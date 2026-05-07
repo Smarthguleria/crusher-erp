@@ -1,10 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useDB } from '@/store/DBContext';
 import { useToast } from '@/store/ToastContext';
 import Modal from '@/components/Modal';
-import { fmt, partyBalance, today, totalBalance } from '@/lib/helpers';
+import ConfirmDialog from '@/components/ConfirmDialog';
+import NumberInput from '@/components/NumberInput';
+import { fmt, isPositiveNumber, partyBalance, paymentModeLabel, today, totalBalance } from '@/lib/helpers';
+import type { LedgerEntry, PaymentMode } from '@/lib/types';
 
 export default function LedgerPage() {
   const { db, setDb } = useDB();
@@ -15,14 +18,27 @@ export default function LedgerPage() {
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(today());
   const [note, setNote] = useState('');
+  const [paymentMode, setPaymentMode] = useState<PaymentMode | ''>('');
+  const [confirmDel, setConfirmDel] = useState<LedgerEntry | null>(null);
 
   const bal = totalBalance(db);
   const cr = db.ledger.filter(e => e.type === 'credit').reduce((a, e) => a + e.amount, 0);
   const dr = db.ledger.filter(e => e.type === 'debit').reduce((a, e) => a + e.amount, 0);
 
+  // Compute running balance per row in chronological order, then reverse for display.
+  const ledgerWithBalance = useMemo(() => {
+    const sorted = [...db.ledger].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime() || a.ledger_id - b.ledger_id);
+    let run = 0;
+    const out = sorted.map(e => {
+      run += e.type === 'credit' ? e.amount : -e.amount;
+      return { entry: e, running: run };
+    });
+    return out.reverse();
+  }, [db.ledger]);
+
   const save = () => {
-    const amt = parseFloat(amount) || 0;
-    if (!pid || amt <= 0) { toast('Party and amount required', 'error'); return; }
+    if (!pid) { toast('Select a party', 'error'); return; }
+    if (!isPositiveNumber(amount)) { toast('Amount must be a positive number', 'error'); return; }
     setDb(prev => {
       const next = { ...prev, ledger: [...prev.ledger], counters: { ...prev.counters } };
       next.counters.ledger += 1;
@@ -30,21 +46,25 @@ export default function LedgerPage() {
         ledger_id: next.counters.ledger,
         party_id: parseInt(pid),
         type,
-        amount: amt,
-        note,
+        amount: parseFloat(amount),
+        note: note.trim(),
         date: new Date(date).toISOString(),
         auto: false,
+        payment_status: type === 'debit' ? 'paid' : undefined,
+        payment_mode: type === 'debit' && paymentMode ? paymentMode : undefined,
       });
       return next;
     });
-    setShowModal(false); setPid(''); setAmount(''); setNote('');
+    setShowModal(false); setPid(''); setAmount(''); setNote(''); setPaymentMode('');
     toast('Transaction saved!', 'success');
   };
 
-  const delLedger = (id: number) => {
-    if (!confirm('Delete this transaction entry?')) return;
+  const performDelete = () => {
+    if (!confirmDel) return;
+    const id = confirmDel.ledger_id;
     setDb(prev => ({ ...prev, ledger: prev.ledger.filter(e => e.ledger_id !== id) }));
     toast('Entry deleted', 'warning');
+    setConfirmDel(null);
   };
 
   return (
@@ -94,6 +114,7 @@ export default function LedgerPage() {
                   <div>
                     <span style={{ fontWeight: 700, fontSize: 13 }}>{p.party_name}</span>
                     <span className="tag-chip" style={{ marginLeft: 6 }}>{p.state}</span>
+                    {p.gst_enabled === false && <span className="tag-chip" style={{ marginLeft: 4, background: '#FEF6E0', color: '#9A5A10' }}>No GST</span>}
                   </div>
                   <div style={{ fontWeight: 800, fontSize: 14, color: b >= 0 ? 'var(--green)' : 'var(--red)' }}>
                     ₹{fmt(Math.abs(b))} <span style={{ fontSize: 11 }}>{b >= 0 ? 'CR' : 'DR'}</span>
@@ -113,21 +134,34 @@ export default function LedgerPage() {
           {db.ledger.length === 0 ? (
             <div className="empty"><div className="empty-icon">📝</div>No transactions yet</div>
           ) : (
-            <div className="tbl" style={{ maxHeight: 360, overflowY: 'auto' }}>
+            <div className="tbl" style={{ maxHeight: 480, overflowY: 'auto' }}>
               <table>
-                <thead><tr><th>Date</th><th>Party</th><th>Type</th><th>Note</th><th>Amount</th><th></th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Date</th><th>Ref</th><th>Party</th><th>Note</th>
+                    <th>Type</th><th>Amount</th><th>Mode</th><th>Balance</th><th></th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {[...db.ledger].reverse().map(e => {
+                  {ledgerWithBalance.map(({ entry: e, running }) => {
                     const p = db.parties.find(x => x.party_id === e.party_id);
+                    const ref = e.invoice_id ? `INV-${e.invoice_id}` : e.slip_id ? `#${e.slip_id}` : '—';
                     return (
                       <tr key={e.ledger_id}>
                         <td style={{ fontSize: 10.5, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{new Date(e.date).toLocaleDateString('en-IN')}</td>
+                        <td className="mono" style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)' }}>{ref}</td>
                         <td style={{ fontSize: 12, fontWeight: 500 }}>{p?.party_name || '—'}</td>
+                        <td style={{ fontSize: 10.5, color: 'var(--text3)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.note || ''}>{e.note || '—'}</td>
                         <td><span className={`badge ${e.type === 'credit' ? 'bg' : 'br'}`}>{e.type === 'credit' ? 'CR' : 'DR'}</span></td>
-                        <td style={{ fontSize: 10.5, color: 'var(--text3)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.note || ''}>{e.note || '—'}</td>
-                        <td className={e.type === 'credit' ? 'tx-cr' : 'tx-dr'} style={{ whiteSpace: 'nowrap' }}>₹{fmt(e.amount)}</td>
+                        <td className={e.type === 'credit' ? 'tx-cr' : 'tx-dr'} style={{ whiteSpace: 'nowrap', fontWeight: 700 }}>₹{fmt(e.amount)}</td>
+                        <td style={{ fontSize: 10.5, color: 'var(--text2)' }}>
+                          {e.type === 'debit' ? paymentModeLabel(e.payment_mode) : (e.payment_mode ? paymentModeLabel(e.payment_mode) : '—')}
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap', fontWeight: 700, color: running >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                          ₹{fmt(Math.abs(running))} {running >= 0 ? 'CR' : 'DR'}
+                        </td>
                         <td>{!e.auto
-                          ? <button className="btn btn-xs" onClick={() => delLedger(e.ledger_id)} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>✕</button>
+                          ? <button className="btn btn-xs" onClick={() => setConfirmDel(e)} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>✕</button>
                           : <span style={{ color: 'var(--text3)', fontSize: 11 }}>auto</span>}</td>
                       </tr>
                     );
@@ -158,13 +192,23 @@ export default function LedgerPage() {
           <div className="g2">
             <div className="fg-row">
               <label className="flbl">Amount (₹) <span className="req">*</span></label>
-              <input type="number" min="0" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" />
+              <NumberInput mode="decimal" value={amount} onChange={setAmount} placeholder="0.00" />
             </div>
             <div className="fg-row">
               <label className="flbl">Date</label>
               <input type="date" value={date} onChange={e => setDate(e.target.value)} />
             </div>
           </div>
+          {type === 'debit' && (
+            <div className="fg-row">
+              <label className="flbl">Payment Mode</label>
+              <select value={paymentMode} onChange={e => setPaymentMode(e.target.value as any)}>
+                <option value="">— Optional —</option>
+                <option value="cash">💵 Cash</option>
+                <option value="online">🏦 Online</option>
+              </select>
+            </div>
+          )}
           <div className="fg-row">
             <label className="flbl">Note / Description</label>
             <input type="text" value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. Payment received for Slip #1001" />
@@ -174,6 +218,17 @@ export default function LedgerPage() {
             <button className="btn" onClick={() => setShowModal(false)}>Cancel</button>
           </div>
         </Modal>
+      )}
+
+      {confirmDel && (
+        <ConfirmDialog
+          title="Delete this transaction?"
+          message={`Delete this ${confirmDel.type === 'credit' ? 'credit' : 'debit'} entry of ₹${fmt(confirmDel.amount)}?\n\nThis cannot be undone.`}
+          confirmLabel="Delete entry"
+          danger
+          onConfirm={performDelete}
+          onCancel={() => setConfirmDel(null)}
+        />
       )}
     </>
   );

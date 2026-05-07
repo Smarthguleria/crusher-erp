@@ -1,16 +1,17 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import Link from 'next/link';
 import { useDB } from '@/store/DBContext';
 import { useToast } from '@/store/ToastContext';
 import PaymentSelector from '@/components/PaymentSelector';
 import SharePanel from '@/components/SharePanel';
 import SlipDocument from '@/components/SlipDocument';
+import NumberInput from '@/components/NumberInput';
 import {
-  calcGST, today, fmt2, getPartyRate, gstTypeBadge, gstTypeLabel, payClass, payLabel, stockRemaining,
+  calcGST, today, fmt2, getPartyRate, gstTypeBadge, gstTypeLabel, isPositiveNumber, payClass, payLabel, stockRemaining,
 } from '@/lib/helpers';
-import type { PaymentStatus, Slip, LedgerEntry } from '@/lib/types';
+import type { PaymentStatus, PaymentMode, Slip, LedgerEntry } from '@/lib/types';
 
 type CftUnit = 'in' | 'ft' | 'cm' | 'mt' | 'cft';
 
@@ -26,6 +27,9 @@ export default function SlipPage() {
   const [rate, setRate] = useState<string>('');
   const [qty, setQty] = useState<string>('');
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('pending');
+  const [paymentMode, setPaymentMode] = useState<PaymentMode | null>(null);
+  // Per-slip GST override. Defaults to the selected party's gst_enabled setting.
+  const [gstEnabled, setGstEnabled] = useState<boolean>(true);
 
   const [cftUnit, setCftUnit] = useState<CftUnit>('in');
   const [cftL, setCftL] = useState<string>('');
@@ -39,6 +43,11 @@ export default function SlipPage() {
   const mat = useMemo(() => db.materials.find(m => m.id === parseInt(matId)), [db.materials, matId]);
   const partyState = party?.state || '';
   const gstPct = mat?.gst_percent || 5;
+
+  // When the party changes, sync GST mode to that party's default treatment.
+  useEffect(() => {
+    if (party) setGstEnabled(party.gst_enabled !== false);
+  }, [party]);
 
   const onPartyChange = (val: string) => {
     setPartyId(val);
@@ -79,7 +88,7 @@ export default function SlipPage() {
 
   const qtyN = parseFloat(qty) || 0;
   const rateN = parseFloat(rate) || 0;
-  const calc = qtyN > 0 && rateN > 0 && partyState ? calcGST(qtyN, rateN, gstPct, partyState) : null;
+  const calc = qtyN > 0 && rateN > 0 && partyState ? calcGST(qtyN, rateN, gstPct, partyState, gstEnabled) : null;
 
   const stockWarn = (() => {
     if (!mat || qtyN <= 0) return null;
@@ -99,29 +108,32 @@ export default function SlipPage() {
   })();
 
   const submit = () => {
-    if (!vehicle || !partyId || !matId || qtyN <= 0) {
-      toast('Please fill: Vehicle, Party, Material and Quantity.', 'error');
-      return;
+    if (!vehicle || !partyId || !matId) {
+      toast('Please fill: Vehicle, Party, Material.', 'error'); return;
     }
-    if (rateN <= 0) {
-      toast('⚠ Rate is ₹0 — enter the selling rate per CFT.', 'error');
-      return;
+    if (!isPositiveNumber(qty)) { toast('Quantity must be a positive number.', 'error'); return; }
+    if (!isPositiveNumber(rate)) { toast('Rate must be a positive number.', 'error'); return; }
+    if (paymentStatus === 'paid' && !paymentMode) {
+      toast('Select Payment Mode (Cash or Online) when status is Paid.', 'error'); return;
     }
     setDb(prev => {
-      const next = { ...prev, materials: [...prev.materials], parties: [...prev.parties], slips: [...prev.slips], ledger: [...prev.ledger] };
+      const next = {
+        ...prev, materials: [...prev.materials], parties: [...prev.parties],
+        slips: [...prev.slips], ledger: [...prev.ledger],
+      };
       const p = next.parties.find(x => x.party_id === parseInt(partyId))!;
       const m = next.materials.find(x => x.id === parseInt(matId))!;
-      const g = calcGST(qtyN, rateN, m.gst_percent, p.state);
+      const g = calcGST(qtyN, rateN, m.gst_percent, p.state, gstEnabled);
       next.counters = { ...next.counters, slip: next.counters.slip + 1 };
       const slip: Slip = {
         slip_id: next.counters.slip,
-        vehicle_number: vehicle.toUpperCase(),
-        driver_name: driver,
+        vehicle_number: vehicle.toUpperCase().trim(),
+        driver_name: driver.trim(),
         party_id: p.party_id,
         material_id: m.id,
         quantity: qtyN,
         rate: rateN,
-        gst_percent: m.gst_percent,
+        gst_percent: gstEnabled ? m.gst_percent : 0,
         base_amount: g.base,
         gst_amount: g.gstAmt,
         cgst: g.cgst,
@@ -132,10 +144,14 @@ export default function SlipPage() {
         date: new Date(date).toISOString(),
         invoiced: false,
         payment_status: paymentStatus,
+        gst_enabled: gstEnabled,
+        payment_mode: paymentStatus === 'paid' && paymentMode ? paymentMode : undefined,
       };
       next.slips.push(slip);
+
+      // Sale credit (always one entry — never duplicated by invoice generation later).
       next.counters = { ...next.counters, ledger: next.counters.ledger + 1 };
-      const le: LedgerEntry = {
+      const credit: LedgerEntry = {
         ledger_id: next.counters.ledger,
         party_id: p.party_id,
         type: 'credit',
@@ -145,8 +161,11 @@ export default function SlipPage() {
         slip_id: slip.slip_id,
         auto: true,
         payment_status: paymentStatus,
+        payment_mode: slip.payment_mode,
       };
-      next.ledger.push(le);
+      next.ledger.push(credit);
+
+      // If paid at slip-creation time, record the matching receipt as a debit.
       if (paymentStatus === 'paid') {
         next.counters = { ...next.counters, ledger: next.counters.ledger + 1 };
         next.ledger.push({
@@ -156,8 +175,10 @@ export default function SlipPage() {
           amount: g.final,
           note: `Payment received — Slip #${slip.slip_id}`,
           date: new Date().toISOString(),
+          slip_id: slip.slip_id,
           auto: true,
           payment_status: 'paid',
+          payment_mode: slip.payment_mode,
         });
       }
       setGenerated(slip);
@@ -169,7 +190,8 @@ export default function SlipPage() {
   if (generated) return <SlipResult slip={generated} onNew={() => {
     setGenerated(null);
     setVehicle(''); setDriver(''); setPartyId(''); setMatId(''); setRate(''); setQty('');
-    setCftL(''); setCftW(''); setCftH(''); setCftDirect(''); setPaymentStatus('pending');
+    setCftL(''); setCftW(''); setCftH(''); setCftDirect('');
+    setPaymentStatus('pending'); setPaymentMode(null);
   }} />;
 
   const cftLabels: Record<CftUnit, string> = { in: 'in', ft: 'ft', cm: 'cm', mt: 'm', cft: 'CFT' };
@@ -203,7 +225,7 @@ export default function SlipPage() {
             <label className="flbl">Party <span className="req">*</span></label>
             <select value={partyId} onChange={e => onPartyChange(e.target.value)}>
               <option value="">— Select Party —</option>
-              {db.parties.map(p => <option key={p.party_id} value={p.party_id}>{p.party_name} ({p.state})</option>)}
+              {db.parties.map(p => <option key={p.party_id} value={p.party_id}>{p.party_name} ({p.state}){p.gst_enabled === false ? ' · No GST' : ''}</option>)}
             </select>
             {db.parties.length === 0 && (
               <div className="field-hint" style={{ color: 'var(--amber)' }}>
@@ -211,11 +233,40 @@ export default function SlipPage() {
               </div>
             )}
           </div>
+
+          <div className="fg-row">
+            <label className="flbl">GST Treatment <span className="req">*</span></label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <label style={{
+                flex: 1, padding: '9px 12px', borderRadius: 'var(--r)', cursor: 'pointer',
+                border: `1.5px solid ${gstEnabled ? 'var(--accent3)' : 'var(--border)'}`,
+                background: gstEnabled ? 'var(--accent-light)' : 'var(--surface)',
+                fontSize: 12, fontWeight: 700, color: gstEnabled ? 'var(--accent)' : 'var(--text2)',
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <input type="radio" checked={gstEnabled} onChange={() => setGstEnabled(true)} style={{ width: 'auto' }} />
+                With GST
+              </label>
+              <label style={{
+                flex: 1, padding: '9px 12px', borderRadius: 'var(--r)', cursor: 'pointer',
+                border: `1.5px solid ${!gstEnabled ? 'var(--accent3)' : 'var(--border)'}`,
+                background: !gstEnabled ? 'var(--accent-light)' : 'var(--surface)',
+                fontSize: 12, fontWeight: 700, color: !gstEnabled ? 'var(--accent)' : 'var(--text2)',
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <input type="radio" checked={!gstEnabled} onChange={() => setGstEnabled(false)} style={{ width: 'auto' }} />
+                Without GST
+              </label>
+            </div>
+            <div className="field-hint">{gstEnabled ? 'CGST+SGST or IGST applied based on party state.' : 'No tax — total = subtotal.'}</div>
+          </div>
+
           <div className="fg-row">
             <label className="flbl">GST Jurisdiction</label>
             <input value={partyState} readOnly placeholder="Auto-filled from party" />
-            {party && <div style={{ marginTop: 4 }}><span className={`badge ${gstTypeBadge(partyState)}`}>{gstTypeLabel(partyState)}</span></div>}
+            {party && gstEnabled && <div style={{ marginTop: 4 }}><span className={`badge ${gstTypeBadge(partyState)}`}>{gstTypeLabel(partyState)}</span></div>}
           </div>
+
           <div className="divider" />
           <div className="section-hdr">Material &amp; Pricing</div>
           <div className="fg-row">
@@ -232,11 +283,11 @@ export default function SlipPage() {
           <div className="g2">
             <div className="fg-row">
               <label className="flbl">Selling Rate (₹/CFT) <span className="req">*</span></label>
-              <input type="number" min="0" step="0.01" value={rate} onChange={e => setRate(e.target.value)} placeholder="Enter rate per cft" />
+              <NumberInput mode="decimal" value={rate} onChange={setRate} placeholder="Enter rate per cft" />
             </div>
             <div className="fg-row">
               <label className="flbl">GST Rate</label>
-              <input value={mat ? mat.gst_percent + '%' : ''} readOnly placeholder="Auto" />
+              <input value={gstEnabled ? (mat ? mat.gst_percent + '%' : '') : '0% (without GST)'} readOnly />
             </div>
           </div>
           {rateWarn && (
@@ -261,21 +312,21 @@ export default function SlipPage() {
               <div className="g3" style={{ gap: 8, marginBottom: 10 }}>
                 <div>
                   <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Length ({cftLabels[cftUnit]})</label>
-                  <input type="number" min="0" step="0.01" value={cftL} onChange={e => setCftL(e.target.value)} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
+                  <NumberInput mode="decimal" value={cftL} onChange={setCftL} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
                 </div>
                 <div>
                   <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Width ({cftLabels[cftUnit]})</label>
-                  <input type="number" min="0" step="0.01" value={cftW} onChange={e => setCftW(e.target.value)} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
+                  <NumberInput mode="decimal" value={cftW} onChange={setCftW} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
                 </div>
                 <div>
                   <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Height ({cftLabels[cftUnit]})</label>
-                  <input type="number" min="0" step="0.01" value={cftH} onChange={e => setCftH(e.target.value)} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
+                  <NumberInput mode="decimal" value={cftH} onChange={setCftH} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
                 </div>
               </div>
             ) : (
               <div style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>CFT Value</label>
-                <input type="number" min="0" step="0.001" value={cftDirect} onChange={e => setCftDirect(e.target.value)} placeholder="Enter cubic feet directly" style={{ padding: '6px 9px', fontSize: 12, maxWidth: 220 }} />
+                <NumberInput mode="decimal" value={cftDirect} onChange={setCftDirect} placeholder="Enter cubic feet directly" style={{ padding: '6px 9px', fontSize: 12, maxWidth: 220 }} />
               </div>
             )}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
@@ -290,35 +341,40 @@ export default function SlipPage() {
 
           <div className="fg-row">
             <label className="flbl">Quantity (CFT) <span className="req">*</span></label>
-            <input type="number" min="0" step="0.001" value={qty} onChange={e => setQty(e.target.value)} placeholder="0.000" />
+            <NumberInput mode="decimal" value={qty} onChange={setQty} placeholder="0.000" />
           </div>
           {stockWarn && <div className={`alert alert-${stockWarn.type}`}>{stockWarn.msg}</div>}
 
           {calc && (
             <div className="calc-box" style={{ marginTop: 10 }}>
-              <div className="cr"><span style={{ color: 'var(--text2)' }}>Taxable ({qtyN} CFT × ₹{rateN})</span><span style={{ fontWeight: 700 }}>₹{fmt2(calc.base)}</span></div>
-              {calc.isPunjab ? (
+              <div className="cr"><span style={{ color: 'var(--text2)' }}>{gstEnabled ? 'Taxable' : 'Subtotal'} ({qtyN} CFT × ₹{rateN})</span><span style={{ fontWeight: 700 }}>₹{fmt2(calc.base)}</span></div>
+              {gstEnabled && (calc.isPunjab ? (
                 <>
                   <div className="cr" style={{ color: 'var(--text3)' }}><span>CGST @ {gstPct / 2}%</span><span>₹{calc.cgst.toFixed(2)}</span></div>
                   <div className="cr" style={{ color: 'var(--text3)' }}><span>SGST @ {gstPct / 2}%</span><span>₹{calc.sgst.toFixed(2)}</span></div>
                 </>
               ) : (
                 <div className="cr" style={{ color: 'var(--text3)' }}><span>IGST @ {gstPct}%</span><span>₹{calc.igst.toFixed(2)}</span></div>
-              )}
+              ))}
               <div className="cr tot"><span>Total Payable</span><span>₹{fmt2(calc.final)}</span></div>
               <div style={{ fontSize: 10.5, color: 'var(--accent3)', marginTop: 4, fontWeight: 600 }}>
-                {calc.isPunjab ? '🏠 Intra-State — CGST + SGST applicable' : '🌐 Inter-State — IGST applicable'}
+                {!gstEnabled ? '🚫 Without GST — total equals subtotal' : calc.isPunjab ? '🏠 Intra-State — CGST + SGST applicable' : '🌐 Inter-State — IGST applicable'}
               </div>
             </div>
           )}
           <div className="divider" />
           <div className="section-hdr">Payment Status <span className="req">*</span></div>
           <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>Select how this sale is being settled right now</div>
-          <PaymentSelector value={paymentStatus} onChange={setPaymentStatus} />
+          <PaymentSelector
+            value={paymentStatus}
+            onChange={s => { setPaymentStatus(s); if (s !== 'paid') setPaymentMode(null); }}
+            mode={paymentMode}
+            onModeChange={setPaymentMode}
+          />
           <div style={{ marginTop: 10, padding: '8px 12px', background: 'var(--surface2)', borderRadius: 'var(--r)', fontSize: 11, color: 'var(--text3)', lineHeight: 1.7 }}>
-            <strong style={{ color: 'var(--green)' }}>Paid</strong> = Cash/transfer received immediately &nbsp;&nbsp;
+            <strong style={{ color: 'var(--green)' }}>Paid</strong> — pick Cash or Online below &nbsp;&nbsp;
             <strong style={{ color: 'var(--amber)' }}>Pending</strong> = Invoice raised, payment expected &nbsp;&nbsp;
-            <strong style={{ color: 'var(--red)' }}>Debt</strong> = Supplied on credit, no commitment date
+            <strong style={{ color: 'var(--red)' }}>Debt</strong> = Supplied on credit
           </div>
           <button className="btn btnp" style={{ width: '100%', padding: 11, marginTop: 16, fontSize: 14 }} onClick={submit}>
             ✓ Generate Slip
@@ -336,7 +392,9 @@ export default function SlipPage() {
                       <div style={{ fontWeight: 800, fontSize: 15 }}>{db.bizInfo.name}</div>
                       <div style={{ fontSize: 10, opacity: 0.6, marginTop: 2, fontFamily: "'JetBrains Mono',monospace" }}>{db.bizInfo.gstin}</div>
                     </div>
-                    <div style={{ background: 'rgba(255,255,255,0.15)', padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700 }}>PREVIEW</div>
+                    <div style={{ background: 'rgba(255,255,255,0.15)', padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700 }}>
+                      PREVIEW · {gstEnabled ? 'GST' : 'NO GST'}
+                    </div>
                   </div>
                 </div>
                 <div style={{ padding: 16 }}>
@@ -347,8 +405,8 @@ export default function SlipPage() {
                     ['Material', mat.material_name],
                     ['Quantity', qtyN + ' CFT'],
                     ['Rate per CFT', '₹' + rateN],
-                    ['Taxable Amt', '₹' + calc.base.toFixed(2)],
-                    [calc.isPunjab ? 'CGST+SGST' : 'IGST', '₹' + calc.gstAmt.toFixed(2)],
+                    [gstEnabled ? 'Taxable Amt' : 'Subtotal', '₹' + calc.base.toFixed(2)],
+                    ...(gstEnabled ? [[calc.isPunjab ? 'CGST+SGST' : 'IGST', '₹' + calc.gstAmt.toFixed(2)] as [string, string]] : []),
                   ].map(([l, v]) => (
                     <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px dotted var(--border)', fontSize: 12 }}>
                       <span style={{ color: 'var(--text3)' }}>{l}</span>
@@ -359,7 +417,9 @@ export default function SlipPage() {
                     <span>Total Payable</span><span>₹{fmt2(calc.final)}</span>
                   </div>
                   <div style={{ marginTop: 10, textAlign: 'center' }}>
-                    <span className={`ps-pill ps-${paymentStatus}`}>{payLabel(paymentStatus)}</span>
+                    <span className={`ps-pill ps-${paymentStatus}`}>
+                      {payLabel(paymentStatus)}{paymentStatus === 'paid' && paymentMode ? ` · ${paymentMode === 'cash' ? 'Cash' : 'Online'}` : ''}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -385,12 +445,13 @@ function SlipResult({ slip, onNew }: { slip: Slip; onNew: () => void }) {
           <div className="pt">Slip #{slip.slip_id} Generated</div>
           <div className="ps">{new Date(slip.date).toLocaleString('en-IN')}</div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn" onClick={onNew}>+ New Slip</button>
+          <Link href={`/slips/${slip.slip_id}`} className="btn">Edit / Manage</Link>
           {!slip.invoiced && (
             <Link href={`/invoice?slip=${slip.slip_id}`} className="btn btnb">Generate Invoice</Link>
           )}
-          <button className="btn btnp" onClick={() => window.print()}>🖨 Print</button>
+          <button className="btn btnp" onClick={() => window.print()}>🖨 Print / Download PDF</button>
         </div>
       </div>
       <div className="alert alert-success no-print" style={{ marginBottom: 14 }}>

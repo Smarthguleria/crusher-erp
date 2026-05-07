@@ -1,4 +1,5 @@
 export type PaymentStatus = 'paid' | 'pending' | 'debt';
+export type PaymentMode = 'cash' | 'online';
 
 export interface Material {
   id: number;
@@ -20,6 +21,8 @@ export interface Party {
   gstin?: string;
   address?: string;
   rates: Record<string, number>;
+  // GST treatment for this party. true = With GST (CGST+SGST or IGST), false = Without GST.
+  gst_enabled: boolean;
 }
 
 export interface Slip {
@@ -41,6 +44,10 @@ export interface Slip {
   date: string;
   invoiced: boolean;
   payment_status: PaymentStatus;
+  // Snapshot of party.gst_enabled at slip-creation time, so historical slips don't change.
+  gst_enabled: boolean;
+  // Cash / Online — only present when payment_status = 'paid'.
+  payment_mode?: PaymentMode;
 }
 
 export interface Invoice {
@@ -62,6 +69,8 @@ export interface Invoice {
   driver_name?: string;
   date: string;
   payment_status: PaymentStatus;
+  gst_enabled: boolean;
+  payment_mode?: PaymentMode;
 }
 
 export interface LedgerEntry {
@@ -72,8 +81,10 @@ export interface LedgerEntry {
   note?: string;
   date: string;
   slip_id?: number;
+  invoice_id?: number;
   auto?: boolean;
   payment_status?: PaymentStatus;
+  payment_mode?: PaymentMode;
 }
 
 export interface BizInfo {

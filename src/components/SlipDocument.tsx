@@ -1,7 +1,7 @@
 'use client';
 
 import { useDB } from '@/store/DBContext';
-import { fmt2, payClass, payLabel } from '@/lib/helpers';
+import { fmt2, payClass, payLabel, paymentModeLabel } from '@/lib/helpers';
 import type { Slip } from '@/lib/types';
 
 export default function SlipDocument({ slip }: { slip: Slip }) {
@@ -17,6 +17,7 @@ export default function SlipDocument({ slip }: { slip: Slip }) {
   }
   const ip = slip.party_state === 'Punjab';
   const ps = slip.payment_status || 'pending';
+  const gstOn = slip.gst_enabled !== false;
 
   return (
     <div id="inv-full-page" className="inv-doc">
@@ -29,6 +30,9 @@ export default function SlipDocument({ slip }: { slip: Slip }) {
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 13, fontWeight: 800 }}>VEHICLE SLIP</div>
             <div className="mono" style={{ fontSize: 11, opacity: 0.7 }}>#{slip.slip_id}</div>
+            <div style={{ fontSize: 9.5, color: gstOn ? '#A5D6A7' : '#FFD54F', marginTop: 2, fontWeight: 700 }}>
+              {gstOn ? 'WITH GST' : 'WITHOUT GST'}
+            </div>
           </div>
         </div>
       </div>
@@ -38,15 +42,15 @@ export default function SlipDocument({ slip }: { slip: Slip }) {
           ['Vehicle No.', slip.vehicle_number],
           slip.driver_name ? ['Driver', slip.driver_name] : null,
           ['Bill To', party.party_name + (party.gstin ? ' | GSTIN: ' + party.gstin : '')],
-          ['State / GST', party.state + ' — ' + (ip ? 'CGST+SGST' : 'IGST')],
+          ['State / GST', party.state + ' — ' + (gstOn ? (ip ? 'CGST+SGST' : 'IGST') : 'No GST')],
           ['Material', mat.material_name],
           ['HSN Code', mat.hsn_code],
           ['Quantity', slip.quantity + ' CFT'],
           ['Rate per CFT', '₹' + slip.rate],
-          ['Taxable Amount', '₹' + slip.base_amount.toFixed(2)],
-          ip ? ['CGST ' + slip.gst_percent / 2 + '%', '₹' + slip.cgst.toFixed(2)] : null,
-          ip ? ['SGST ' + slip.gst_percent / 2 + '%', '₹' + slip.sgst.toFixed(2)] : null,
-          !ip ? ['IGST ' + slip.gst_percent + '%', '₹' + slip.igst.toFixed(2)] : null,
+          gstOn ? ['Taxable Amount', '₹' + slip.base_amount.toFixed(2)] : ['Subtotal', '₹' + slip.base_amount.toFixed(2)],
+          gstOn && ip ? ['CGST ' + slip.gst_percent / 2 + '%', '₹' + slip.cgst.toFixed(2)] : null,
+          gstOn && ip ? ['SGST ' + slip.gst_percent / 2 + '%', '₹' + slip.sgst.toFixed(2)] : null,
+          gstOn && !ip ? ['IGST ' + slip.gst_percent + '%', '₹' + slip.igst.toFixed(2)] : null,
         ].filter(Boolean) as [string, string][]).map(([l, v]) => (
           <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px dotted var(--border)', fontSize: 12.5 }}>
             <span style={{ color: 'var(--text3)' }}>{l}</span>
@@ -58,7 +62,9 @@ export default function SlipDocument({ slip }: { slip: Slip }) {
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px dotted var(--border)' }}>
           <span style={{ fontSize: 11, color: 'var(--text3)' }}>Payment Status</span>
-          <span className={`ps-pill ${payClass(ps)}`}>{payLabel(ps)}</span>
+          <span className={`ps-pill ${payClass(ps)}`}>
+            {payLabel(ps)}{ps === 'paid' && slip.payment_mode ? ` · ${paymentModeLabel(slip.payment_mode)}` : ''}
+          </span>
         </div>
         <div style={{ textAlign: 'center', fontSize: 10, color: 'var(--text3)', marginTop: 14, paddingTop: 10, borderTop: '1px dotted var(--border)' }}>
           Authorized Signatory &nbsp;·&nbsp; Computer Generated

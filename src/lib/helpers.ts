@@ -1,4 +1,4 @@
-import type { DBShape, Party, Slip, Invoice, PaymentStatus } from './types';
+import type { DBShape, Party, Slip, Invoice, PaymentStatus, PaymentMode } from './types';
 
 export const fmt = (n: number) =>
   Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
@@ -15,8 +15,12 @@ export const fmtMT = (n: number) =>
 
 export const today = () => new Date().toISOString().split('T')[0];
 
-export function calcGST(qty: number, rate: number, gstPct: number, partyState: string) {
+export function calcGST(qty: number, rate: number, gstPct: number, partyState: string, gstEnabled = true) {
   const base = parseFloat((qty * rate).toFixed(2));
+  // gst_enabled = false → no tax at all; total = subtotal.
+  if (!gstEnabled) {
+    return { base, gstAmt: 0, final: base, cgst: 0, sgst: 0, igst: 0, isPunjab: partyState === 'Punjab', gstEnabled: false };
+  }
   const gstAmt = parseFloat((base * gstPct / 100).toFixed(2));
   const final = parseFloat((base + gstAmt).toFixed(2));
   const isPunjab = partyState === 'Punjab';
@@ -26,6 +30,7 @@ export function calcGST(qty: number, rate: number, gstPct: number, partyState: s
     sgst: isPunjab ? parseFloat((gstAmt / 2).toFixed(2)) : 0,
     igst: isPunjab ? 0 : gstAmt,
     isPunjab,
+    gstEnabled: true,
   };
 }
 
@@ -67,6 +72,30 @@ export const gstTypeLabel = (state: string) =>
 
 export const gstTypeBadge = (state: string) =>
   state === 'Punjab' ? 'bg' : 'bb';
+
+export const paymentModeLabel = (m: PaymentMode | undefined | null) =>
+  m === 'cash' ? 'Cash' : m === 'online' ? 'Online' : '—';
+
+// ───────────────────────── Validators ─────────────────────────
+// Indian mobile: 10 digits, starting 6-9.
+export const isValidPhone = (p: string) => /^[6-9][0-9]{9}$/.test(p.trim());
+// GSTIN: 15 chars — 2 state + 5 alpha + 4 digits + 1 alpha + 1 alphanum + Z + 1 alphanum.
+export const isValidGSTIN = (g: string) => /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(g.trim());
+export const isPositiveNumber = (s: string) => {
+  if (!s.trim()) return false;
+  const n = parseFloat(s);
+  return !isNaN(n) && isFinite(n) && n > 0;
+};
+
+// ───────────────────── Link-checking helpers ─────────────────────
+// True if the party has any slips, invoices, or auto-generated ledger entries linked.
+// Used to block hard-deletes that would leave dangling references.
+export function partyHasLinkedRecords(db: DBShape, partyId: number) {
+  const slips = db.slips.filter(s => s.party_id === partyId).length;
+  const invoices = db.invoices.filter(i => i.party_id === partyId).length;
+  const ledger = db.ledger.filter(l => l.party_id === partyId).length;
+  return { slips, invoices, ledger, total: slips + invoices + ledger };
+}
 
 export const getPartyRate = (party: Party | undefined | null, mid: number | string): number | null => {
   if (!party || !party.rates) return null;

@@ -1,7 +1,7 @@
 'use client';
 
 import { useDB } from '@/store/DBContext';
-import { numToWords, payLabel } from '@/lib/helpers';
+import { numToWords, payLabel, paymentModeLabel } from '@/lib/helpers';
 import type { Invoice } from '@/lib/types';
 
 export default function InvoiceDocument({ inv }: { inv: Invoice }) {
@@ -18,10 +18,12 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
   }
   const ip = inv.party_state === 'Punjab';
   const ps = inv.payment_status || 'pending';
+  const gstOn = inv.gst_enabled !== false;
   const invDate = new Date(inv.date);
   const slipDate = slip ? new Date(slip.date) : invDate;
   const psColor = ps === 'paid' ? '#1A6B35' : ps === 'pending' ? '#B45309' : '#B91C1C';
   const psBg = ps === 'paid' ? '#DCFCE7' : ps === 'pending' ? '#FEF3C7' : '#FEE2E2';
+  const psSuffix = ps === 'paid' && inv.payment_mode ? ` · ${paymentModeLabel(inv.payment_mode)}` : '';
 
   return (
     <div id="inv-full-page" style={{ background: '#fff', borderRadius: 16, overflow: 'hidden', boxShadow: '0 8px 40px rgba(0,0,0,0.12)', maxWidth: 900, margin: '0 auto', color: '#1a1a1a', border: '1px solid #e0e0e0' }}>
@@ -47,8 +49,8 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
             ['Invoice Date', invDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })],
             ['Dispatch Date', slipDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })],
             ['Slip Ref', '#' + inv.slip_id],
-            ['GST Type', ip ? 'Intra-State' : 'Inter-State'],
-            ['Status', payLabel(ps)],
+            ['GST Type', gstOn ? (ip ? 'Intra-State' : 'Inter-State') : 'Without GST'],
+            ['Status', payLabel(ps) + psSuffix],
           ].map(([l, v], i) => (
             <div key={l} style={{ flex: 1, minWidth: 90, padding: '10px 14px', borderLeft: i > 0 ? '1px solid rgba(255,255,255,0.1)' : 'none' }}>
               <div style={{ fontSize: 8.5, fontWeight: 700, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 3 }}>{l}</div>
@@ -107,11 +109,11 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
               <th style={{ padding: '11px 12px', textAlign: 'center', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>HSN Code</th>
               <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>Qty (CFT)</th>
               <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>Rate/CFT (₹)</th>
-              <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>Taxable (₹)</th>
-              {ip ? <>
+              <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>{gstOn ? 'Taxable (₹)' : 'Subtotal (₹)'}</th>
+              {gstOn && (ip ? <>
                 <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>CGST (₹)</th>
                 <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>SGST (₹)</th>
-              </> : <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>IGST (₹)</th>}
+              </> : <th style={{ padding: '11px 12px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>IGST (₹)</th>)}
               <th style={{ padding: '11px 14px', textAlign: 'right', color: '#fff', fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase' }}>Total (₹)</th>
             </tr>
           </thead>
@@ -121,7 +123,7 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
               <td style={{ padding: '16px 14px' }}>
                 <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a1a' }}>{mat.material_name}</div>
                 <div style={{ fontSize: 11, color: '#888', marginTop: 3, lineHeight: 1.6 }}>
-                  Crushed Stone Aggregate · GST Rate: {inv.gst_percent}%<br />
+                  Crushed Stone Aggregate{gstOn ? ` · GST Rate: ${inv.gst_percent}%` : ' · No GST'}<br />
                   Vehicle: <strong style={{ color: '#444' }}>{inv.vehicle_number}</strong>{inv.driver_name && <> · Driver: <strong style={{ color: '#444' }}>{inv.driver_name}</strong></>}
                 </div>
               </td>
@@ -129,7 +131,7 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
               <td style={{ padding: '16px 12px', textAlign: 'right', fontWeight: 800, fontSize: 15 }}>{inv.quantity}</td>
               <td style={{ padding: '16px 12px', textAlign: 'right', fontWeight: 700, color: '#444' }}>₹{inv.rate}</td>
               <td style={{ padding: '16px 12px', textAlign: 'right', fontWeight: 700, color: '#444' }}>₹{inv.base_amount.toFixed(2)}</td>
-              {ip ? <>
+              {gstOn && (ip ? <>
                 <td style={{ padding: '16px 12px', textAlign: 'right', color: '#555' }}>
                   <div style={{ fontWeight: 700 }}>₹{inv.cgst.toFixed(2)}</div>
                   <div style={{ fontSize: 10, color: '#999' }}>{inv.gst_percent / 2}%</div>
@@ -141,7 +143,7 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
               </> : <td style={{ padding: '16px 12px', textAlign: 'right', color: '#555' }}>
                 <div style={{ fontWeight: 700 }}>₹{inv.igst.toFixed(2)}</div>
                 <div style={{ fontSize: 10, color: '#999' }}>{inv.gst_percent}%</div>
-              </td>}
+              </td>)}
               <td style={{ padding: '16px 14px', textAlign: 'right', fontWeight: 900, fontSize: 17, color: '#1B5E20' }}>₹{inv.final_amount.toFixed(2)}</td>
             </tr>
           </tbody>
@@ -153,7 +155,7 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
           <div style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: 2, color: '#2E7D32', textTransform: 'uppercase', marginBottom: 12 }}>Payment &amp; Terms</div>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10, padding: '10px 18px', borderRadius: 10, background: psBg, border: `1.5px solid ${psColor}`, marginBottom: 16 }}>
             <div style={{ width: 10, height: 10, borderRadius: '50%', background: psColor }} />
-            <span style={{ fontSize: 15, fontWeight: 900, color: psColor }}>{payLabel(ps)}</span>
+            <span style={{ fontSize: 15, fontWeight: 900, color: psColor }}>{payLabel(ps)}{psSuffix}</span>
           </div>
           <div style={{ fontSize: 11.5, color: '#888', lineHeight: 2, marginTop: 4 }}>
             <div>• Goods once dispatched will not be taken back</div>
@@ -166,10 +168,10 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
           <div style={{ fontSize: 8.5, fontWeight: 800, letterSpacing: 2, color: '#2E7D32', textTransform: 'uppercase', marginBottom: 14 }}>Amount Summary</div>
           <div style={{ border: '1.5px solid #e8ece8', borderRadius: 10, overflow: 'hidden' }}>
             <div style={{ padding: '10px 16px', display: 'flex', justifyContent: 'space-between', fontSize: 13, background: '#F8FCF8', borderBottom: '1px solid #e8ece8' }}>
-              <span style={{ color: '#666' }}>Taxable Value</span>
+              <span style={{ color: '#666' }}>{gstOn ? 'Taxable Value' : 'Subtotal'}</span>
               <span style={{ fontWeight: 700 }}>₹{inv.base_amount.toFixed(2)}</span>
             </div>
-            {ip ? <>
+            {gstOn && (ip ? <>
               <div style={{ padding: '9px 16px', display: 'flex', justifyContent: 'space-between', fontSize: 12.5, borderBottom: '1px dashed #e8ece8' }}>
                 <span style={{ color: '#888' }}>CGST @ {inv.gst_percent / 2}%</span>
                 <span style={{ fontWeight: 600, color: '#555' }}>₹{inv.cgst.toFixed(2)}</span>
@@ -181,7 +183,7 @@ export default function InvoiceDocument({ inv }: { inv: Invoice }) {
             </> : <div style={{ padding: '9px 16px', display: 'flex', justifyContent: 'space-between', fontSize: 12.5, borderBottom: '1.5px solid #e8ece8' }}>
               <span style={{ color: '#888' }}>IGST @ {inv.gst_percent}%</span>
               <span style={{ fontWeight: 600, color: '#555' }}>₹{inv.igst.toFixed(2)}</span>
-            </div>}
+            </div>)}
             <div style={{ padding: 16, background: 'linear-gradient(135deg,#1B5E20,#2E7D32)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ color: 'rgba(255,255,255,0.8)', fontWeight: 700, fontSize: 13 }}>Grand Total</span>
               <span style={{ color: '#fff', fontWeight: 900, fontSize: 22, letterSpacing: -0.5 }}>₹{inv.final_amount.toFixed(2)}</span>

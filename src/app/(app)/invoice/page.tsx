@@ -9,7 +9,7 @@ import PaymentSelector from '@/components/PaymentSelector';
 import SharePanel from '@/components/SharePanel';
 import InvoiceDocument from '@/components/InvoiceDocument';
 import { fmt2, payClass, payLabel } from '@/lib/helpers';
-import type { PaymentStatus, Invoice, LedgerEntry } from '@/lib/types';
+import type { PaymentStatus, PaymentMode, Invoice, LedgerEntry } from '@/lib/types';
 
 function InvoicePageInner() {
   const { db, setDb } = useDB();
@@ -19,6 +19,7 @@ function InvoicePageInner() {
 
   const [slipId, setSlipId] = useState<string>(initialSlipId || '');
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('pending');
+  const [paymentMode, setPaymentMode] = useState<PaymentMode | null>(null);
   const [generated, setGenerated] = useState<Invoice | null>(null);
 
   const uninvoiced = useMemo(() => db.slips.filter(s => !s.invoiced), [db.slips]);
@@ -26,15 +27,32 @@ function InvoicePageInner() {
   const party = slip ? db.parties.find(p => p.party_id === slip.party_id) : null;
   const mat = slip ? db.materials.find(m => m.id === slip.material_id) : null;
 
-  useEffect(() => { if (slip) setPaymentStatus(slip.payment_status || 'pending'); }, [slip]);
+  useEffect(() => {
+    if (slip) {
+      setPaymentStatus(slip.payment_status || 'pending');
+      setPaymentMode(slip.payment_mode ?? null);
+    }
+  }, [slip]);
 
   const submit = () => {
     if (!slip || !party || !mat) { toast('Please select a slip', 'error'); return; }
+    if (paymentStatus === 'paid' && !paymentMode) {
+      toast('Select Payment Mode (Cash or Online) when status is Paid.', 'error'); return;
+    }
+
     setDb(prev => {
-      const next = { ...prev, slips: [...prev.slips], invoices: [...prev.invoices], ledger: [...prev.ledger], counters: { ...prev.counters } };
+      const next = {
+        ...prev, slips: [...prev.slips], invoices: [...prev.invoices],
+        ledger: [...prev.ledger], counters: { ...prev.counters },
+      };
       const s = next.slips.find(x => x.slip_id === slip.slip_id)!;
+      const oldStatus = s.payment_status;
+
+      // Snapshot payment status + mode onto the slip too — they must agree.
       s.payment_status = paymentStatus;
+      s.payment_mode = paymentStatus === 'paid' && paymentMode ? paymentMode : undefined;
       s.invoiced = true;
+
       next.counters.invoice += 1;
       const inv: Invoice = {
         invoice_id: next.counters.invoice,
@@ -55,21 +73,44 @@ function InvoicePageInner() {
         driver_name: s.driver_name,
         date: new Date().toISOString(),
         payment_status: paymentStatus,
+        gst_enabled: s.gst_enabled,
+        payment_mode: s.payment_mode,
       };
       next.invoices.push(inv);
-      next.counters.ledger += 1;
-      const le: LedgerEntry = {
-        ledger_id: next.counters.ledger,
-        party_id: s.party_id,
-        type: 'credit',
-        amount: s.final_amount,
-        note: `Invoice INV-${inv.invoice_id} — Slip #${s.slip_id} [${payLabel(paymentStatus)}]`,
-        date: new Date().toISOString(),
-        auto: true,
-        payment_status: paymentStatus,
-      };
-      next.ledger.push(le);
-      if (paymentStatus === 'paid') {
+
+      // ─── Ledger dedup ───
+      // Slip generation already wrote the sale credit. Invoicing the same slip should NOT
+      // create a second credit. Instead, find the existing slip credit (auto, type=credit,
+      // slip_id matches) and update its note + status to reflect the invoice.
+      const credit = next.ledger.find(
+        l => l.auto && l.type === 'credit' && l.slip_id === s.slip_id
+      );
+      if (credit) {
+        credit.note = `Invoice INV-${inv.invoice_id} — Slip #${s.slip_id} [${payLabel(paymentStatus)}]`;
+        credit.payment_status = paymentStatus;
+        credit.payment_mode = s.payment_mode;
+        credit.invoice_id = inv.invoice_id;
+      } else {
+        // Defensive fallback: if the slip credit was manually deleted, create one now.
+        next.counters.ledger += 1;
+        next.ledger.push({
+          ledger_id: next.counters.ledger,
+          party_id: s.party_id,
+          type: 'credit',
+          amount: s.final_amount,
+          note: `Invoice INV-${inv.invoice_id} — Slip #${s.slip_id} [${payLabel(paymentStatus)}]`,
+          date: new Date().toISOString(),
+          slip_id: s.slip_id,
+          invoice_id: inv.invoice_id,
+          auto: true,
+          payment_status: paymentStatus,
+          payment_mode: s.payment_mode,
+        });
+      }
+
+      // Receipt debit: only add if status moved INTO 'paid'. If the slip was already paid,
+      // its receipt debit already exists and we don't duplicate it.
+      if (paymentStatus === 'paid' && oldStatus !== 'paid') {
         next.counters.ledger += 1;
         next.ledger.push({
           ledger_id: next.counters.ledger,
@@ -78,10 +119,30 @@ function InvoicePageInner() {
           amount: s.final_amount,
           note: `Payment received — INV-${inv.invoice_id}`,
           date: new Date().toISOString(),
+          slip_id: s.slip_id,
+          invoice_id: inv.invoice_id,
           auto: true,
           payment_status: 'paid',
+          payment_mode: s.payment_mode,
         });
+      } else if (paymentStatus === 'paid' && oldStatus === 'paid') {
+        // Status unchanged — but mode may have changed. Update the existing receipt debit
+        // so the ledger shows the correct mode.
+        const debit = next.ledger.find(
+          l => l.auto && l.type === 'debit' && l.slip_id === s.slip_id
+        );
+        if (debit) {
+          debit.payment_mode = s.payment_mode;
+          debit.note = `Payment received — INV-${inv.invoice_id}`;
+          debit.invoice_id = inv.invoice_id;
+        }
+      } else if (oldStatus === 'paid' && paymentStatus !== 'paid') {
+        // Reverting from paid: drop the auto receipt debit so balance recovers.
+        next.ledger = next.ledger.filter(
+          l => !(l.auto && l.type === 'debit' && l.slip_id === s.slip_id)
+        );
       }
+
       setGenerated(inv);
       return next;
     });
@@ -133,7 +194,7 @@ function InvoicePageInner() {
                 ['Material', mat.material_name],
                 ['Vehicle', slip.vehicle_number],
                 ['Qty & Rate', slip.quantity + ' CFT @ ₹' + slip.rate + '/CFT'],
-                ['GST Type', slip.party_state === 'Punjab' ? 'CGST+SGST (Intra-State)' : 'IGST (Inter-State)'],
+                ['GST Treatment', slip.gst_enabled ? (slip.party_state === 'Punjab' ? 'CGST+SGST (Intra-State)' : 'IGST (Inter-State)') : 'Without GST'],
               ].map(([l, v]) => (
                 <div key={l} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12.5 }}>
                   <span style={{ color: 'var(--text3)' }}>{l}</span>
@@ -148,13 +209,18 @@ function InvoicePageInner() {
           <div className="divider" />
           <div className="section-hdr">Update Payment Status</div>
           <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>Override the slip's payment status for this invoice</div>
-          <PaymentSelector value={paymentStatus} onChange={setPaymentStatus} />
+          <PaymentSelector
+            value={paymentStatus}
+            onChange={s => { setPaymentStatus(s); if (s !== 'paid') setPaymentMode(null); }}
+            mode={paymentMode}
+            onModeChange={setPaymentMode}
+          />
           <button className="btn btnp" style={{ width: '100%', padding: 11, marginTop: 16, fontSize: 14 }} onClick={submit}>Generate Invoice</button>
         </div>
 
         <div>
           {slip && party && mat ? (
-            <InvoicePreview slip={slip} party={party} mat={mat} ps={paymentStatus} bizInfo={db.bizInfo} />
+            <InvoicePreview slip={slip} party={party} mat={mat} ps={paymentStatus} mode={paymentMode} bizInfo={db.bizInfo} />
           ) : (
             <div style={{ border: '2px dashed var(--border)', borderRadius: 'var(--rxl)', height: 200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)', gap: 8 }}>
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -171,10 +237,12 @@ export default function Page() {
   return <Suspense fallback={null}><InvoicePageInner /></Suspense>;
 }
 
-function InvoicePreview({ slip, party, mat, ps, bizInfo }: any) {
+function InvoicePreview({ slip, party, mat, ps, mode, bizInfo }: any) {
   const ip = slip.party_state === 'Punjab';
+  const gstOn = slip.gst_enabled !== false;
   const psColor = ps === 'paid' ? '#1A6B35' : ps === 'pending' ? '#B45309' : '#B91C1C';
   const psBg = ps === 'paid' ? '#DCFCE7' : ps === 'pending' ? '#FEF3C7' : '#FEE2E2';
+  const modeLbl = ps === 'paid' && mode ? (mode === 'cash' ? ' · Cash' : ' · Online') : '';
   return (
     <>
       <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 }}>Invoice Preview</div>
@@ -190,11 +258,11 @@ function InvoicePreview({ slip, party, mat, ps, bizInfo }: any) {
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 9, letterSpacing: 2, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase' }}>Tax Invoice</div>
               <div style={{ fontSize: 20, fontWeight: 900, color: '#fff', lineHeight: 1 }}>INVOICE</div>
-              <div style={{ fontSize: 11, fontWeight: 800, color: '#81C784', fontFamily: "'JetBrains Mono',monospace" }}>DRAFT</div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: '#81C784', fontFamily: "'JetBrains Mono',monospace" }}>DRAFT · {gstOn ? 'GST' : 'NO GST'}</div>
             </div>
           </div>
           <div style={{ display: 'flex', marginTop: 14, borderRadius: '6px 6px 0 0', overflow: 'hidden', background: 'rgba(0,0,0,0.2)' }}>
-            {[['Date', new Date(slip.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })], ['Slip Ref', '#' + slip.slip_id], ['GST', ip ? 'Intra-State' : 'Inter-State'], ['Status', payLabel(ps)]].map(([l, v], i) => (
+            {[['Date', new Date(slip.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })], ['Slip Ref', '#' + slip.slip_id], ['GST', gstOn ? (ip ? 'Intra-State' : 'Inter-State') : 'Without GST'], ['Status', payLabel(ps) + modeLbl]].map(([l, v], i) => (
               <div key={l} style={{ flex: 1, padding: '8px 10px', borderLeft: i > 0 ? '1px solid rgba(255,255,255,0.1)' : 'none' }}>
                 <div style={{ fontSize: 8, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 2 }}>{l}</div>
                 <div style={{ fontSize: 11, fontWeight: 800, color: l === 'Status' ? (ps === 'paid' ? '#81C784' : ps === 'pending' ? '#FFD54F' : '#EF9A9A') : '#fff' }}>{v}</div>
@@ -202,68 +270,40 @@ function InvoicePreview({ slip, party, mat, ps, bizInfo }: any) {
             ))}
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: '1px solid #e8ece8' }}>
-          <div style={{ padding: '14px 18px', borderRight: '1px solid #e8ece8' }}>
-            <div style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1.5, color: '#2E7D32', textTransform: 'uppercase', marginBottom: 6 }}>Seller</div>
-            <div style={{ fontWeight: 800, fontSize: 13 }}>{bizInfo.name}</div>
-            <div style={{ fontSize: 10.5, color: '#666', marginTop: 2 }}>{bizInfo.address}</div>
-            <div style={{ fontSize: 10, color: '#888', fontFamily: "'JetBrains Mono',monospace", marginTop: 2 }}>GSTIN: {bizInfo.gstin}</div>
+        <div style={{ padding: '16px 22px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>Bill To</div>
+              <div style={{ fontWeight: 800, fontSize: 13 }}>{party.party_name}</div>
+              <div style={{ fontSize: 10.5, color: '#666' }}>{party.state}{party.gstin ? ' · GSTIN: ' + party.gstin : ''}</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>Vehicle</div>
+              <div className="mono" style={{ fontWeight: 700, fontSize: 12 }}>{slip.vehicle_number}</div>
+            </div>
           </div>
-          <div style={{ padding: '14px 18px', background: '#FAFCFA' }}>
-            <div style={{ fontSize: 8, fontWeight: 800, letterSpacing: 1.5, color: '#2E7D32', textTransform: 'uppercase', marginBottom: 6 }}>Buyer</div>
-            <div style={{ fontWeight: 800, fontSize: 13 }}>{party.party_name}</div>
-            <div style={{ fontSize: 10.5, color: '#666', marginTop: 2 }}>{party.state}{party.phone ? ' · ' + party.phone : ''}</div>
-            {party.gstin && <div style={{ fontSize: 10, color: '#888', fontFamily: "'JetBrains Mono',monospace", marginTop: 2 }}>GSTIN: {party.gstin}</div>}
+          <div style={{ background: '#FAFAFA', borderRadius: 8, padding: 12, marginTop: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+              <span>{mat.material_name} — {slip.quantity} CFT @ ₹{slip.rate}/CFT</span>
+              <span style={{ fontWeight: 700 }}>₹{slip.base_amount.toFixed(2)}</span>
+            </div>
+            {gstOn && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#888' }}>
+                <span>{ip ? `CGST ${slip.gst_percent / 2}% + SGST ${slip.gst_percent / 2}%` : `IGST ${slip.gst_percent}%`}</span>
+                <span>₹{slip.gst_amount.toFixed(2)}</span>
+              </div>
+            )}
           </div>
-        </div>
-        <div style={{ padding: '14px 18px 10px' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-            <thead>
-              <tr style={{ background: 'linear-gradient(90deg,#1B5E20,#2E7D32)' }}>
-                <th style={{ padding: '8px 10px', textAlign: 'left', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>Description</th>
-                <th style={{ padding: '8px 8px', textAlign: 'center', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>HSN</th>
-                <th style={{ padding: '8px 8px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>Qty</th>
-                <th style={{ padding: '8px 8px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>Rate</th>
-                <th style={{ padding: '8px 8px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>Taxable</th>
-                {ip ? <>
-                  <th style={{ padding: '8px 8px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>CGST</th>
-                  <th style={{ padding: '8px 8px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>SGST</th>
-                </> : <th style={{ padding: '8px 8px', textAlign: 'right', color: 'rgba(255,255,255,0.7)', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>IGST</th>}
-                <th style={{ padding: '8px 10px', textAlign: 'right', color: '#fff', fontSize: 8.5, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style={{ borderBottom: '1.5px solid #e8ece8' }}>
-                <td style={{ padding: '12px 10px' }}>
-                  <div style={{ fontWeight: 800, fontSize: 13 }}>{mat.material_name}</div>
-                  <div style={{ fontSize: 10, color: '#888' }}>GST: {slip.gst_percent}%</div>
-                </td>
-                <td style={{ padding: '12px 8px', textAlign: 'center', fontFamily: "'JetBrains Mono',monospace", fontSize: 10.5, color: '#2E7D32', fontWeight: 700 }}>{mat.hsn_code}</td>
-                <td style={{ padding: '12px 8px', textAlign: 'right', fontWeight: 800 }}>{slip.quantity} CFT</td>
-                <td style={{ padding: '12px 8px', textAlign: 'right', color: '#555' }}>₹{slip.rate}</td>
-                <td style={{ padding: '12px 8px', textAlign: 'right', fontWeight: 600 }}>₹{slip.base_amount.toFixed(2)}</td>
-                {ip ? <>
-                  <td style={{ padding: '12px 8px', textAlign: 'right', color: '#666' }}>₹{slip.cgst.toFixed(2)}</td>
-                  <td style={{ padding: '12px 8px', textAlign: 'right', color: '#666' }}>₹{slip.sgst.toFixed(2)}</td>
-                </> : <td style={{ padding: '12px 8px', textAlign: 'right', color: '#666' }}>₹{slip.igst.toFixed(2)}</td>}
-                <td style={{ padding: '12px 10px', textAlign: 'right', fontWeight: 900, color: '#1B5E20', fontSize: 14 }}>₹{slip.final_amount.toFixed(2)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div style={{ padding: '0 18px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 14px', borderRadius: 8, background: psBg, border: `1.5px solid ${psColor}` }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: psColor }} />
-            <span style={{ fontSize: 12, fontWeight: 800, color: psColor }}>{payLabel(ps)}</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, padding: '10px 14px', background: 'linear-gradient(135deg,#1B5E20,#2E7D32)', color: '#fff', borderRadius: 8, fontWeight: 800, fontSize: 16 }}>
+            <span>Grand Total</span>
+            <span>₹{slip.final_amount.toFixed(2)}</span>
           </div>
-          <div style={{ textAlign: 'right' }}>
-            {ip
-              ? <div style={{ fontSize: 11, color: '#888' }}>CGST {slip.gst_percent / 2}%: ₹{slip.cgst.toFixed(2)} · SGST {slip.gst_percent / 2}%: ₹{slip.sgst.toFixed(2)}</div>
-              : <div style={{ fontSize: 11, color: '#888' }}>IGST {slip.gst_percent}%: ₹{slip.igst.toFixed(2)}</div>}
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#1B5E20', marginTop: 2 }}>Grand Total: ₹{slip.final_amount.toFixed(2)}</div>
+          <div style={{ marginTop: 10, textAlign: 'center' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 14, background: psBg, border: `1px solid ${psColor}`, fontSize: 11, fontWeight: 700, color: psColor }}>
+              {payLabel(ps)}{modeLbl}
+            </span>
           </div>
         </div>
-        <div style={{ height: 3, background: 'linear-gradient(90deg,#1B5E20,#2E7D32,#43A047,#A5D6A7)' }} />
       </div>
     </>
   );
@@ -285,7 +325,8 @@ function InvoiceResult({ inv }: { inv: Invoice }) {
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <Link href="/invoices" className="btn">← All Invoices</Link>
-          <button className="btn btnp" onClick={() => window.print()}>Print / Save PDF</button>
+          <Link href={`/invoices/${inv.invoice_id}`} className="btn btnb">Edit / Manage</Link>
+          <button className="btn btnp" onClick={() => window.print()}>Print / Download PDF</button>
         </div>
       </div>
       <div className="alert alert-success no-print" style={{ marginBottom: 18 }}>

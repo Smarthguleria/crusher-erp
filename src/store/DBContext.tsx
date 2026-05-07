@@ -38,12 +38,14 @@ function migrate(db: DBShape): DBShape {
   });
   db.parties.forEach(p => {
     if (!p.rates) p.rates = {};
-    if (p.rates) {
-      const nr: Record<string, number> = {};
-      Object.keys(p.rates).forEach(k => { nr[String(k)] = parseFloat(String((p.rates as any)[k])); });
-      p.rates = nr;
-    }
+    const nr: Record<string, number> = {};
+    Object.keys(p.rates).forEach(k => { nr[String(k)] = parseFloat(String((p.rates as any)[k])); });
+    p.rates = nr;
+    // Existing parties default to "with GST" so historical behaviour is preserved.
+    if (p.gst_enabled === undefined) p.gst_enabled = true;
   });
+  db.slips.forEach(s => { if (s.gst_enabled === undefined) s.gst_enabled = true; });
+  db.invoices.forEach(i => { if (i.gst_enabled === undefined) i.gst_enabled = true; });
   if (!db.bizInfo) db.bizInfo = { ...DEFAULT_DB.bizInfo };
   if (!db.counters) db.counters = { slip: 1000, invoice: 100, ledger: 1 };
   return db;

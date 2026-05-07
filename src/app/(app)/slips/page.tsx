@@ -6,7 +6,8 @@ import { useDB } from '@/store/DBContext';
 import { useToast } from '@/store/ToastContext';
 import DateFilter from '@/components/DateFilter';
 import SharePanel from '@/components/SharePanel';
-import { dateRangeFilter, fmt, fmt2, payClass, payLabel, today } from '@/lib/helpers';
+import ConfirmDialog from '@/components/ConfirmDialog';
+import { dateRangeFilter, fmt, fmt2, payClass, payLabel, paymentModeLabel, today } from '@/lib/helpers';
 import type { PaymentStatus } from '@/lib/types';
 
 export default function SlipsPage() {
@@ -18,6 +19,19 @@ export default function SlipsPage() {
   const [payFilter, setPayFilter] = useState('all');
   const [matFilter, setMatFilter] = useState('all');
   const [openShare, setOpenShare] = useState<number | null>(null);
+  const [confirmDel, setConfirmDel] = useState<{ slip_id: number; final_amount: number; ps: PaymentStatus } | null>(null);
+
+  const performDelete = () => {
+    if (!confirmDel) return;
+    const id = confirmDel.slip_id;
+    setDb(prev => ({
+      ...prev,
+      slips: prev.slips.filter(s => s.slip_id !== id),
+      ledger: prev.ledger.filter(l => !(l.auto && l.slip_id === id)),
+    }));
+    toast(`Slip #${id} deleted`, 'warning');
+    setConfirmDel(null);
+  };
 
   const filtered = useMemo(() => {
     let f = dateRangeFilter(db.slips, from, to);
@@ -39,11 +53,27 @@ export default function SlipsPage() {
 
   const changeStatus = (slipId: number, newStatus: PaymentStatus) => {
     setDb(prev => {
-      const next = { ...prev, slips: [...prev.slips], ledger: [...prev.ledger], counters: { ...prev.counters } };
+      const next = { ...prev, slips: [...prev.slips], invoices: [...prev.invoices], ledger: [...prev.ledger], counters: { ...prev.counters } };
       const s = next.slips.find(x => x.slip_id === slipId);
       if (!s) return prev;
       const old = s.payment_status;
       s.payment_status = newStatus;
+      if (newStatus !== 'paid') s.payment_mode = undefined;
+
+      // Sync linked invoice + sale-credit row.
+      const linkedInv = next.invoices.find(i => i.slip_id === slipId);
+      if (linkedInv) {
+        linkedInv.payment_status = newStatus;
+        if (newStatus !== 'paid') linkedInv.payment_mode = undefined;
+      }
+      const credit = next.ledger.find(l => l.auto && l.type === 'credit' && l.slip_id === slipId);
+      if (credit) {
+        credit.payment_status = newStatus;
+        if (newStatus !== 'paid') credit.payment_mode = undefined;
+      }
+
+      // Reconcile receipt debit.
+      const existingDebit = next.ledger.find(l => l.auto && l.type === 'debit' && l.slip_id === slipId);
       if (newStatus === 'paid' && old !== 'paid') {
         next.counters.ledger += 1;
         next.ledger.push({
@@ -51,11 +81,16 @@ export default function SlipsPage() {
           party_id: s.party_id,
           type: 'debit',
           amount: s.final_amount,
-          note: `Payment received — Slip #${s.slip_id} (status updated)`,
+          note: `Payment received — Slip #${s.slip_id}`,
           date: new Date().toISOString(),
+          slip_id: s.slip_id,
+          invoice_id: linkedInv?.invoice_id,
           auto: true,
           payment_status: 'paid',
         });
+        toast('Inline change set status to Paid. Open the slip to set Cash/Online mode.', 'warning', 4500);
+      } else if (newStatus !== 'paid' && existingDebit) {
+        next.ledger = next.ledger.filter(l => l.ledger_id !== existingDebit.ledger_id);
       }
       return next;
     });
@@ -105,11 +140,11 @@ export default function SlipsPage() {
           <div className="tbl">
             <table>
               <thead>
-                <tr><th>Slip #</th><th>Date</th><th>Vehicle</th><th>Party</th><th>Material</th><th>Quantity</th><th>Total</th><th>Payment</th><th>Invoice</th><th>View</th><th>Share</th><th>Change Status</th></tr>
+                <tr><th>Slip #</th><th>Date</th><th>Vehicle</th><th>Party</th><th>Material</th><th>Quantity</th><th>Total</th><th>Payment</th><th>Mode</th><th>Invoice</th><th>View</th><th>Share</th><th>Change Status</th><th>Delete</th></tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
-                  <tr><td colSpan={12}><div className="empty"><div className="empty-icon">🔍</div>No slips found for selected filters</div></td></tr>
+                  <tr><td colSpan={14}><div className="empty"><div className="empty-icon">🔍</div>No slips found for selected filters</div></td></tr>
                 ) : [...filtered].reverse().map(s => {
                   const p = db.parties.find(x => x.party_id === s.party_id);
                   const m = db.materials.find(x => x.id === s.material_id);
@@ -125,6 +160,7 @@ export default function SlipsPage() {
                         <td className="mono" style={{ fontSize: 11 }}>{fmt2(s.quantity)} CFT</td>
                         <td style={{ fontWeight: 700 }}>₹{fmt(s.final_amount)}</td>
                         <td><span className={`ps-pill ${payClass(ps)}`}>{payLabel(ps)}</span></td>
+                        <td style={{ fontSize: 11, color: 'var(--text2)' }}>{ps === 'paid' ? paymentModeLabel(s.payment_mode) : '—'}</td>
                         <td><span className={`badge ${s.invoiced ? 'bb' : 'ba'}`}>{s.invoiced ? 'Invoiced' : 'Not Invoiced'}</span></td>
                         <td><Link href={`/slips/${s.slip_id}`} className="btn btn-sm btnp">View</Link></td>
                         <td><button className="btn btn-sm btnwa" onClick={() => setOpenShare(openShare === s.slip_id ? null : s.slip_id)}>Share</button></td>
@@ -135,10 +171,17 @@ export default function SlipsPage() {
                             <option value="debt">🔴 Debt</option>
                           </select>
                         </td>
+                        <td>
+                          <button className="btn btn-xs"
+                                  onClick={() => setConfirmDel({ slip_id: s.slip_id, final_amount: s.final_amount, ps })}
+                                  disabled={s.invoiced}
+                                  title={s.invoiced ? 'Delete linked invoice first' : 'Delete slip'}
+                                  style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>✕</button>
+                        </td>
                       </tr>
                       {openShare === s.slip_id && (
                         <tr>
-                          <td colSpan={12} style={{ padding: '0 12px 12px' }}><SharePanel obj={s} /></td>
+                          <td colSpan={14} style={{ padding: '0 12px 12px' }}><SharePanel obj={s} /></td>
                         </tr>
                       )}
                     </Fragment>
@@ -149,6 +192,17 @@ export default function SlipsPage() {
           </div>
         )}
       </div>
+
+      {confirmDel && (
+        <ConfirmDialog
+          title="Delete this slip?"
+          message={`Permanently delete Slip #${confirmDel.slip_id} (₹${fmt(confirmDel.final_amount)})?\n\nLinked auto ledger entries (sale credit${confirmDel.ps === 'paid' ? ' and payment receipt' : ''}) will also be removed. This cannot be undone.`}
+          confirmLabel="Delete slip"
+          danger
+          onConfirm={performDelete}
+          onCancel={() => setConfirmDel(null)}
+        />
+      )}
     </>
   );
 }
