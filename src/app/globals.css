@@ -203,8 +203,8 @@ tbody tr{transition:background 0.08s}
 }
 
 .search-wrap{position:relative}
-.search-wrap svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text3);pointer-events:none}
-.search-wrap input{padding-left:32px}
+.search-wrap svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text3);pointer-events:none;z-index:1}
+.search-wrap input{padding-left:32px!important}
 
 @media(max-width:900px){
   .g4{grid-template-columns:repeat(2,minmax(0,1fr))}

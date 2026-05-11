@@ -97,6 +97,76 @@ export function partyHasLinkedRecords(db: DBShape, partyId: number) {
   return { slips, invoices, ledger, total: slips + invoices + ledger };
 }
 
+export function materialHasLinkedRecords(db: DBShape, materialId: number) {
+  const slips = db.slips.filter(s => s.material_id === materialId).length;
+  const invoices = db.invoices.filter(i => i.material_id === materialId).length;
+  const purchases = db.purchases.filter(p => p.material_id === materialId).length;
+  const trips = db.trips.filter(t => t.material_id === materialId).length;
+  return { slips, invoices, purchases, trips, total: slips + invoices + purchases + trips };
+}
+
+export function vehicleHasLinkedRecords(db: DBShape, vehicleId: number) {
+  const trips = db.trips.filter(t => t.vehicle_id === vehicleId).length;
+  const fuel = db.fuel_logs.filter(f => f.vehicle_id === vehicleId).length;
+  const maint = db.maintenance_logs.filter(m => m.vehicle_id === vehicleId).length;
+  const tyres = db.tyre_logs.filter(t => t.vehicle_id === vehicleId).length;
+  const expenses = db.expenses.filter(e => e.vehicle_id === vehicleId).length;
+  const drivers = db.drivers.filter(d => d.vehicle_id === vehicleId).length;
+  return { trips, fuel, maint, tyres, expenses, drivers, total: trips + fuel + maint + tyres + expenses + drivers };
+}
+
+export function driverHasLinkedRecords(db: DBShape, driverId: number) {
+  const trips = db.trips.filter(t => t.driver_id === driverId).length;
+  const fuel = db.fuel_logs.filter(f => f.driver_id === driverId).length;
+  const vehicles = db.vehicles.filter(v => v.driver_id === driverId).length;
+  return { trips, fuel, vehicles, total: trips + fuel + vehicles };
+}
+
+export function supplierHasLinkedRecords(db: DBShape, supplierId: number) {
+  const purchases = db.purchases.filter(p => p.supplier_id === supplierId).length;
+  return { purchases, total: purchases };
+}
+
+// ───────────────────── Expiry status (vehicle docs, driver license) ─────────────────────
+// Returns one of: 'expired' (already past), 'soon' (within 30 days), 'ok' (>30 days),
+// or 'unknown' (no date set). Used for status pills and dashboard alerts.
+export type ExpiryStatus = 'expired' | 'soon' | 'ok' | 'unknown';
+export function expiryStatus(iso?: string | null, soonDays = 30): ExpiryStatus {
+  if (!iso) return 'unknown';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'unknown';
+  const now = new Date();
+  const diffDays = Math.ceil((d.getTime() - now.getTime()) / 86_400_000);
+  if (diffDays < 0) return 'expired';
+  if (diffDays <= soonDays) return 'soon';
+  return 'ok';
+}
+export const expiryBadge = (s: ExpiryStatus) =>
+  s === 'expired' ? 'br' : s === 'soon' ? 'ba' : s === 'ok' ? 'bg' : 'badge-gray';
+export const expiryLabel = (s: ExpiryStatus, iso?: string | null) => {
+  if (s === 'unknown') return '—';
+  if (!iso) return '—';
+  const d = new Date(iso).toLocaleDateString('en-IN');
+  return s === 'expired' ? `Expired (${d})` : s === 'soon' ? `Due soon (${d})` : d;
+};
+
+// ───────────────────── Fuel / fleet analytics ─────────────────────
+// Compute average mileage (KM/L) for a vehicle from its odometer-tagged fuel logs.
+// Needs at least two fill-ups with odometer readings; returns null otherwise.
+export function vehicleMileage(db: DBShape, vehicleId: number): { kmpl: number; samples: number } | null {
+  const logs = db.fuel_logs
+    .filter(f => f.vehicle_id === vehicleId && f.odometer != null && f.quantity > 0)
+    .sort((a, b) => (a.odometer ?? 0) - (b.odometer ?? 0));
+  if (logs.length < 2) return null;
+  const totalKm = (logs[logs.length - 1].odometer ?? 0) - (logs[0].odometer ?? 0);
+  // Litres consumed BETWEEN the first fill and the last (we don't know what the first
+  // fill drove on, only what it filled). Standard practice: sum litres from the second
+  // log onward.
+  const litres = logs.slice(1).reduce((a, l) => a + l.quantity, 0);
+  if (totalKm <= 0 || litres <= 0) return null;
+  return { kmpl: totalKm / litres, samples: logs.length };
+}
+
 export const getPartyRate = (party: Party | undefined | null, mid: number | string): number | null => {
   if (!party || !party.rates) return null;
   const r = party.rates;

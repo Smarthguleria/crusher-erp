@@ -6,7 +6,7 @@ import { Bar } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
 import { useDB } from '@/store/DBContext';
 import DateFilter from '@/components/DateFilter';
-import { dateRangeFilter, fmt, fmt2, payClass, payLabel, stockRemaining, today, shareWA } from '@/lib/helpers';
+import { dateRangeFilter, expiryStatus, fmt, fmt2, payClass, payLabel, stockRemaining, today, shareWA } from '@/lib/helpers';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
 
@@ -39,6 +39,33 @@ export default function DashboardPage() {
   }).filter(x => x.pTotal > 0).sort((a, b) => b.outstanding - a.outstanding);
 
   const recent = [...filtered].reverse().slice(0, 10);
+
+  // ─── Operations: fleet / inventory / expense aggregates (date-range filtered) ───
+  const filteredPurchases = useMemo(() => dateRangeFilter(db.purchases, from, to), [db.purchases, from, to]);
+  const filteredExpenses = useMemo(() => dateRangeFilter(db.expenses, from, to), [db.expenses, from, to]);
+  const filteredTrips = useMemo(() => dateRangeFilter(db.trips, from, to), [db.trips, from, to]);
+  const filteredFuel = useMemo(() => dateRangeFilter(db.fuel_logs, from, to), [db.fuel_logs, from, to]);
+  const totalPurchaseSpend = filteredPurchases.reduce((a, p) => a + p.total_amount, 0);
+  const totalExpenseSpend = filteredExpenses.reduce((a, e) => a + e.amount, 0);
+  const totalFreight = filteredTrips.reduce((a, t) => a + t.freight_amount, 0);
+  const totalFuelCost = filteredFuel.reduce((a, f) => a + f.total_amount, 0);
+  const fleetProfit = totalFreight - totalFuelCost;
+
+  const todayTrips = db.trips.filter(t => t.date.startsWith(ts)).length;
+  const lowStockMats = db.materials.filter(m => (m.min_stock || 0) > 0 && stockRemaining(db, m.id) <= (m.min_stock || 0));
+
+  // Document expiry alerts across the fleet (insurance / fitness / pollution / license).
+  let docAlerts = 0;
+  db.vehicles.forEach(v => {
+    [v.insurance_expiry, v.fitness_expiry, v.pollution_expiry].forEach(d => {
+      const s = expiryStatus(d);
+      if (s === 'expired' || s === 'soon') docAlerts++;
+    });
+  });
+  db.drivers.forEach(d => {
+    const s = expiryStatus(d.license_expiry);
+    if (s === 'expired' || s === 'soon') docAlerts++;
+  });
 
   const chartLabels: string[] = [];
   const chartData: number[] = [];
@@ -112,6 +139,29 @@ export default function DashboardPage() {
           <div className="slbl">🔴 Debt Amount</div>
           <div className="sval-sm tx-dr">₹{fmt(debtAmt)}</div>
           <div className="sval-sub">{debtSlips.length} slips · {(debtSlips.reduce((a, s) => a + s.quantity, 0) / 1000).toFixed(4)} MT</div>
+        </div>
+      </div>
+
+      <div className="g4" style={{ marginBottom: 14 }}>
+        <div className="stat stat-blue">
+          <div className="slbl">📥 Purchases (period)</div>
+          <div className="sval-sm" style={{ color: 'var(--blue)' }}>₹{fmt(totalPurchaseSpend)}</div>
+          <div className="sval-sub">{filteredPurchases.length} entries</div>
+        </div>
+        <div className="stat stat-red">
+          <div className="slbl">💸 Expenses (period)</div>
+          <div className="sval-sm tx-dr">₹{fmt(totalExpenseSpend)}</div>
+          <div className="sval-sub">{filteredExpenses.length} entries</div>
+        </div>
+        <div className="stat stat-green">
+          <div className="slbl">🚛 Fleet Profit (Freight − Fuel)</div>
+          <div className="sval-sm" style={{ color: fleetProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{fmt(Math.abs(fleetProfit))}</div>
+          <div className="sval-sub">{filteredTrips.length} trips · {todayTrips} today · ₹{fmt(totalFuelCost)} fuel</div>
+        </div>
+        <div className="stat stat-amber">
+          <div className="slbl">⚠ Alerts</div>
+          <div className="sval-sm tx-pd">{docAlerts + lowStockMats.length}</div>
+          <div className="sval-sub">{docAlerts} doc expiry · {lowStockMats.length} low stock</div>
         </div>
       </div>
 

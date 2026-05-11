@@ -36,6 +36,35 @@ const NAV: NavItem[] = [
   { href: '/invoices', label: 'All Invoices', icon: (
     <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
   )},
+  { section: 'Fleet', href: '/vehicles', label: 'Vehicles', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 18V6a2 2 0 00-2-2H4a2 2 0 00-2 2v11a1 1 0 001 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 001-1v-3.65a1 1 0 00-.22-.624l-3.48-4.35A1 1 0 0017.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/></svg>
+  )},
+  { href: '/drivers', label: 'Drivers', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+  )},
+  { href: '/trips', label: 'Trips', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 00-8 8c0 1.892.402 3.13 1.5 4.5L12 22l6.5-7.5C19.598 13.13 20 11.892 20 10a8 8 0 00-8-8z"/></svg>
+  )},
+  { href: '/fuel', label: 'Fuel / Diesel', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 22V4a2 2 0 012-2h8a2 2 0 012 2v18"/><path d="M3 14h12"/><path d="M15 11l4-3v9a2 2 0 01-2 2 2 2 0 01-2-2v-2"/></svg>
+  )},
+  { href: '/maintenance', label: 'Maintenance', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
+  )},
+  { href: '/tyres', label: 'Tyres', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/></svg>
+  )},
+
+  { section: 'Inventory', href: '/purchases', label: 'Purchases', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></svg>
+  )},
+  { href: '/suppliers', label: 'Suppliers', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9h18v10a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path d="M3 9l2-5h14l2 5"/><line x1="12" y1="13" x2="12" y2="17"/></svg>
+  )},
+  { href: '/expenses', label: 'Expenses', icon: (
+    <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+  )},
+
   { section: 'Master Data', href: '/materials', label: 'Materials', icon: (
     <svg className="nsvg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/></svg>
   )},

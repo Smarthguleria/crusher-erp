@@ -26,6 +26,11 @@ export default function NumberInput({
       const i = s.indexOf('.');
       if (i >= 0) s = s.slice(0, i + 1) + s.slice(i + 1).replace(/\./g, '');
     }
+    // Strip leading zeros so that typing "5" into a field showing "0" gives "5", not "05".
+    // Preserve a single leading "0." for decimals (e.g. "0.5") and a literal "0".
+    if (s.length > 1 && s[0] === '0' && s[1] !== '.') {
+      s = s.replace(/^0+/, '') || '0';
+    }
     if (maxLength != null && s.length > maxLength) s = s.slice(0, maxLength);
     return s;
   };

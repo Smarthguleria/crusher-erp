@@ -5,12 +5,13 @@ export interface Material {
   id: number;
   material_name: string;
   unit: string;
-  rate: number;
+  rate: number;             // Selling price per unit (₹/CFT)
+  purchase_price?: number;  // Average / last purchase price per unit (₹/CFT)
   gst_percent: number;
   hsn_code: string;
-  stock_tons: number;
-  stock_value: number;
-  min_stock: number;
+  stock_tons: number;       // Current available stock in the material's unit (defaults to CFT)
+  stock_value: number;      // Inventory valuation in ₹
+  min_stock: number;        // Low-stock alert threshold
 }
 
 export interface Party {
@@ -94,13 +95,158 @@ export interface BizInfo {
   phone: string;
 }
 
+// ───────────────────────── Fleet ─────────────────────────
+export interface Vehicle {
+  vehicle_id: number;
+  vehicle_number: string;
+  vehicle_type: string;       // e.g. 'Tipper', 'Trailer', 'Dumper'
+  owner_name?: string;
+  driver_id?: number;         // Currently-assigned driver
+  phone?: string;
+  rc_number?: string;
+  insurance_expiry?: string;  // ISO yyyy-mm-dd
+  fitness_expiry?: string;
+  pollution_expiry?: string;
+  avg_mileage?: number;       // KM per litre
+  status: 'active' | 'inactive';
+  notes?: string;
+}
+
+export interface Driver {
+  driver_id: number;
+  driver_name: string;
+  phone?: string;
+  license_number?: string;
+  license_expiry?: string;
+  address?: string;
+  vehicle_id?: number;        // Currently-assigned vehicle
+  salary_type?: 'monthly' | 'per_trip' | 'daily';
+  salary_amount?: number;
+  status: 'active' | 'inactive';
+}
+
+export interface Trip {
+  trip_id: number;
+  date: string;               // ISO datetime
+  vehicle_id: number;
+  driver_id?: number;
+  material_id?: number;
+  party_id?: number;          // Customer (optional — used for invoice link)
+  invoice_id?: number;        // Linked invoice if billed
+  quantity: number;
+  unit: string;               // CFT / MT
+  loading_point?: string;
+  delivery_location?: string;
+  distance_km: number;
+  diesel_used?: number;       // Litres
+  diesel_cost?: number;       // ₹
+  freight_amount: number;     // Revenue for this trip (₹)
+  status: 'planned' | 'in_progress' | 'completed' | 'cancelled';
+  notes?: string;
+}
+
+export interface FuelLog {
+  fuel_id: number;
+  date: string;
+  vehicle_id: number;
+  driver_id?: number;
+  quantity: number;           // Litres
+  rate: number;               // ₹/L
+  total_amount: number;
+  odometer?: number;          // KM at fill-up
+  station_name?: string;
+  notes?: string;
+}
+
+export interface MaintenanceLog {
+  maint_id: number;
+  vehicle_id: number;
+  service_date: string;
+  service_type: string;       // e.g. 'Oil change', 'Brake job'
+  garage_name?: string;
+  cost: number;
+  next_service_due?: string;
+  odometer?: number;
+  notes?: string;
+}
+
+export interface TyreLog {
+  tyre_id: number;
+  vehicle_id: number;
+  tyre_brand?: string;
+  tyre_position?: string;     // 'Front Left', etc.
+  installation_date: string;
+  removal_date?: string;
+  installation_km?: number;
+  removal_km?: number;
+  cost: number;
+  condition?: 'new' | 'good' | 'worn' | 'damaged';
+  notes?: string;
+}
+
+export type ExpenseCategory =
+  | 'diesel' | 'maintenance' | 'salary' | 'office'
+  | 'labour' | 'electricity' | 'tyre' | 'misc';
+
+export interface Expense {
+  expense_id: number;
+  date: string;
+  category: ExpenseCategory;
+  amount: number;
+  paid_to?: string;
+  vehicle_id?: number;        // Optional vehicle attribution
+  payment_mode?: PaymentMode;
+  notes?: string;
+}
+
+export interface Supplier {
+  supplier_id: number;
+  supplier_name: string;
+  phone?: string;
+  gstin?: string;
+  address?: string;
+  state?: string;
+  notes?: string;
+}
+
+export interface Purchase {
+  purchase_id: number;
+  date: string;               // Arrival date
+  supplier_id?: number;
+  supplier_name?: string;     // Free-text fallback if not in master
+  material_id: number;
+  vehicle_number?: string;
+  driver_name?: string;
+  quantity: number;
+  unit: string;
+  rate: number;               // Purchase rate ₹/unit
+  total_amount: number;
+  royalty_number?: string;
+  weighbridge_slip?: string;
+  notes?: string;
+}
+
 export interface DBShape {
   materials: Material[];
   parties: Party[];
   slips: Slip[];
   invoices: Invoice[];
   ledger: LedgerEntry[];
-  counters: { slip: number; invoice: number; ledger: number };
+  vehicles: Vehicle[];
+  drivers: Driver[];
+  trips: Trip[];
+  fuel_logs: FuelLog[];
+  maintenance_logs: MaintenanceLog[];
+  tyre_logs: TyreLog[];
+  expenses: Expense[];
+  suppliers: Supplier[];
+  purchases: Purchase[];
+  counters: {
+    slip: number; invoice: number; ledger: number;
+    vehicle: number; driver: number; trip: number;
+    fuel: number; maint: number; tyre: number;
+    expense: number; supplier: number; purchase: number;
+  };
   bizInfo: BizInfo;
 }
 

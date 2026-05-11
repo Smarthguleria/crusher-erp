@@ -1,27 +1,30 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useDB } from '@/store/DBContext';
 import { useToast } from '@/store/ToastContext';
 import Modal from '@/components/Modal';
-import { fmt, fmt2, stockRemaining, stockSold } from '@/lib/helpers';
+import ConfirmDialog from '@/components/ConfirmDialog';
+import NumberInput from '@/components/NumberInput';
+import { fmt, fmt2, isPositiveNumber, materialHasLinkedRecords, stockRemaining, stockSold } from '@/lib/helpers';
 import type { Material } from '@/lib/types';
 
 interface MatForm {
   id?: number;
   material_name: string;
   unit: string;
-  rate: number;
-  gst_percent: number;
+  rate: string;
+  purchase_price: string;
+  gst_percent: string;
   hsn_code: string;
-  stock_tons: number;
-  stock_value: number;
-  min_stock: number;
+  stock_tons: string;
+  stock_value: string;
+  min_stock: string;
 }
 
 const EMPTY_FORM: MatForm = {
-  material_name: '', unit: 'CFT', rate: 0, gst_percent: 5, hsn_code: '251710',
-  stock_tons: 0, stock_value: 0, min_stock: 0,
+  material_name: '', unit: 'CFT', rate: '', purchase_price: '', gst_percent: '5', hsn_code: '251710',
+  stock_tons: '', stock_value: '', min_stock: '',
 };
 
 export default function MaterialsPage() {
@@ -29,26 +32,62 @@ export default function MaterialsPage() {
   const toast = useToast();
   const [editForm, setEditForm] = useState<MatForm | null>(null);
   const [stockForm, setStockForm] = useState<{ matId: number; qty: string; rate: string; sv: string; note: string } | null>(null);
+  const [confirmDel, setConfirmDel] = useState<{ id: number; name: string } | null>(null);
+  const [search, setSearch] = useState('');
 
   const totalStock = db.materials.reduce((a, m) => a + (m.stock_tons || 0), 0);
   const totalValue = db.materials.reduce((a, m) => a + (m.stock_value || 0), 0);
   const totalSold = db.slips.reduce((a, s) => a + s.quantity, 0);
 
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return db.materials;
+    return db.materials.filter(m =>
+      m.material_name.toLowerCase().includes(q) ||
+      (m.hsn_code || '').toLowerCase().includes(q) ||
+      (m.unit || '').toLowerCase().includes(q)
+    );
+  }, [db.materials, search]);
+
   const openEdit = (m?: Material) => {
-    setEditForm(m ? { ...m } : { ...EMPTY_FORM });
+    if (m) {
+      setEditForm({
+        id: m.id, material_name: m.material_name, unit: m.unit,
+        rate: String(m.rate || ''),
+        purchase_price: String(m.purchase_price || ''),
+        gst_percent: String(m.gst_percent || 5),
+        hsn_code: m.hsn_code || '',
+        stock_tons: String(m.stock_tons || ''),
+        stock_value: String(m.stock_value || ''),
+        min_stock: String(m.min_stock || ''),
+      });
+    } else {
+      setEditForm({ ...EMPTY_FORM });
+    }
   };
 
   const saveMat = () => {
     if (!editForm) return;
-    if (!editForm.material_name) { toast('Material name is required', 'error'); return; }
+    if (!editForm.material_name.trim()) { toast('Material name is required', 'error'); return; }
     setDb(prev => {
       const next = { ...prev, materials: [...prev.materials] };
+      const data: Material = {
+        id: editForm.id || (Math.max(0, ...next.materials.map(m => m.id)) + 1),
+        material_name: editForm.material_name.trim(),
+        unit: editForm.unit.trim() || 'CFT',
+        rate: parseFloat(editForm.rate) || 0,
+        purchase_price: parseFloat(editForm.purchase_price) || 0,
+        gst_percent: parseFloat(editForm.gst_percent) || 0,
+        hsn_code: editForm.hsn_code.trim() || '251710',
+        stock_tons: parseFloat(editForm.stock_tons) || 0,
+        stock_value: parseFloat(editForm.stock_value) || 0,
+        min_stock: parseFloat(editForm.min_stock) || 0,
+      };
       if (editForm.id) {
-        const m = next.materials.find(x => x.id === editForm.id);
-        if (m) Object.assign(m, editForm);
+        const i = next.materials.findIndex(m => m.id === editForm.id);
+        if (i >= 0) next.materials[i] = data;
       } else {
-        const nid = Math.max(0, ...next.materials.map(m => m.id)) + 1;
-        next.materials.push({ ...editForm, id: nid } as Material);
+        next.materials.push(data);
       }
       return next;
     });
@@ -56,17 +95,41 @@ export default function MaterialsPage() {
     setEditForm(null);
   };
 
+  const requestDelete = (m: Material) => {
+    const links = materialHasLinkedRecords(db, m.id);
+    if (links.total > 0) {
+      const parts = [];
+      if (links.slips) parts.push(`${links.slips} slip${links.slips > 1 ? 's' : ''}`);
+      if (links.invoices) parts.push(`${links.invoices} invoice${links.invoices > 1 ? 's' : ''}`);
+      if (links.purchases) parts.push(`${links.purchases} purchase${links.purchases > 1 ? 's' : ''}`);
+      if (links.trips) parts.push(`${links.trips} trip${links.trips > 1 ? 's' : ''}`);
+      toast(`Cannot delete "${m.material_name}" — linked to ${parts.join(', ')}.`, 'error', 6000);
+      return;
+    }
+    setConfirmDel({ id: m.id, name: m.material_name });
+  };
+
+  const performDelete = () => {
+    if (!confirmDel) return;
+    setDb(prev => ({ ...prev, materials: prev.materials.filter(m => m.id !== confirmDel.id) }));
+    toast('Material deleted', 'warning');
+    setConfirmDel(null);
+  };
+
   const saveStock = () => {
     if (!stockForm) return;
-    const qty = parseFloat(stockForm.qty) || 0;
-    const sv = parseFloat(stockForm.sv) || 0;
-    if (qty <= 0) { toast('Enter a valid quantity', 'error'); return; }
+    if (!isPositiveNumber(stockForm.qty)) { toast('Enter a valid quantity', 'error'); return; }
+    const qty = parseFloat(stockForm.qty);
+    const rate = parseFloat(stockForm.rate) || 0;
+    const sv = parseFloat(stockForm.sv) || (qty * rate);
     setDb(prev => {
       const next = { ...prev, materials: [...prev.materials] };
       const m = next.materials.find(x => x.id === stockForm.matId);
       if (m) {
         m.stock_tons = (m.stock_tons || 0) + qty;
         m.stock_value = (m.stock_value || 0) + sv;
+        // Update average purchase price if a rate was given.
+        if (rate > 0) m.purchase_price = rate;
       }
       return next;
     });
@@ -90,9 +153,19 @@ export default function MaterialsPage() {
         <div className="stat stat-red"><div className="slbl">Total Sold (All Time)</div><div className="sval-sm tx-dr">{(totalSold / 1000).toFixed(4)} MT</div><div className="sval-sub">{fmt2(totalSold)} CFT</div></div>
       </div>
 
+      <div className="filter-bar" style={{ marginBottom: 12 }}>
+        <div className="search-wrap" style={{ flex: 1, minWidth: 220 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, HSN, unit…" />
+        </div>
+        {search && <button className="btn btn-sm" onClick={() => setSearch('')}>Clear</button>}
+      </div>
+
       <div className="card">
         <div className="section-hdr">Material Stock Details</div>
-        {db.materials.map(m => {
+        {filtered.length === 0 ? (
+          <div className="empty"><div className="empty-icon">📦</div>No materials match your search</div>
+        ) : filtered.map(m => {
           const sold = stockSold(db, m.id);
           const rem = stockRemaining(db, m.id);
           const tot = m.stock_tons || 0;
@@ -110,12 +183,13 @@ export default function MaterialsPage() {
                     {m.material_name} {low && <span style={{ color: 'var(--red)', fontSize: 11, fontWeight: 700 }}>⚠ Low Stock</span>}
                   </div>
                   <div className="mono" style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
-                    HSN: {m.hsn_code} · GST: {m.gst_percent}% · Selling Rate: ₹{m.rate}/CFT
+                    HSN: {m.hsn_code} · GST: {m.gst_percent}% · Sell: ₹{m.rate}/CFT{m.purchase_price ? ` · Buy: ₹${m.purchase_price}/CFT` : ''}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <button className="btn btn-sm btng" onClick={() => setStockForm({ matId: m.id, qty: '', rate: String(m.rate), sv: '', note: '' })}>+ Add Stock</button>
+                  <button className="btn btn-sm btng" onClick={() => setStockForm({ matId: m.id, qty: '', rate: String(m.purchase_price || m.rate || ''), sv: '', note: '' })}>+ Add Stock</button>
                   <button className="btn btn-sm" onClick={() => openEdit(m)}>Edit</button>
+                  <button className="btn btn-sm" onClick={() => requestDelete(m)} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>Delete</button>
                 </div>
               </div>
               <div className="g4" style={{ gap: 10, marginBottom: 12 }}>
@@ -163,30 +237,44 @@ export default function MaterialsPage() {
           </div>
           <div className="g2">
             <div className="fg-row"><label className="flbl">Selling Rate (₹/CFT) <span className="req">*</span></label>
-              <input type="number" min="0" value={editForm.rate} onChange={e => {
-                const v = parseFloat(e.target.value) || 0;
-                const sv = (editForm.stock_tons > 0 && v > 0) ? editForm.stock_tons * v : editForm.stock_value;
-                setEditForm({ ...editForm, rate: v, stock_value: sv });
-              }} /></div>
-            <div className="fg-row"><label className="flbl">GST Rate (%)</label>
-              <input type="number" min="0" max="28" value={editForm.gst_percent} onChange={e => setEditForm({ ...editForm, gst_percent: parseFloat(e.target.value) || 0 })} /></div>
+              <NumberInput mode="decimal" value={editForm.rate}
+                           onChange={v => {
+                             const r = parseFloat(v) || 0;
+                             const tons = parseFloat(editForm.stock_tons) || 0;
+                             const sv = (tons > 0 && r > 0) ? String(tons * r) : editForm.stock_value;
+                             setEditForm({ ...editForm, rate: v, stock_value: sv });
+                           }} /></div>
+            <div className="fg-row"><label className="flbl">Purchase Price (₹/CFT)</label>
+              <NumberInput mode="decimal" value={editForm.purchase_price}
+                           onChange={v => setEditForm({ ...editForm, purchase_price: v })} placeholder="Optional buy-side rate" /></div>
           </div>
-          <div className="fg-row"><label className="flbl">HSN Code</label>
-            <input value={editForm.hsn_code} onChange={e => setEditForm({ ...editForm, hsn_code: e.target.value })} /></div>
+          <div className="g2">
+            <div className="fg-row"><label className="flbl">GST Rate (%)</label>
+              <NumberInput mode="decimal" value={editForm.gst_percent}
+                           onChange={v => setEditForm({ ...editForm, gst_percent: v })} /></div>
+            <div className="fg-row"><label className="flbl">HSN Code</label>
+              <input value={editForm.hsn_code} onChange={e => setEditForm({ ...editForm, hsn_code: e.target.value })} /></div>
+          </div>
           <div className="divider" />
           <div className="mo-section">📦 Stock Information</div>
           <div className="g2">
             <div className="fg-row"><label className="flbl">Opening Stock (CFT)</label>
-              <input type="number" min="0" step="0.001" value={editForm.stock_tons} onChange={e => {
-                const v = parseFloat(e.target.value) || 0;
-                const sv = (v > 0 && editForm.rate > 0) ? v * editForm.rate : editForm.stock_value;
-                setEditForm({ ...editForm, stock_tons: v, stock_value: sv });
-              }} /></div>
+              <NumberInput mode="decimal" value={editForm.stock_tons}
+                           onChange={v => {
+                             const tons = parseFloat(v) || 0;
+                             const r = parseFloat(editForm.rate) || 0;
+                             const sv = (tons > 0 && r > 0) ? String(tons * r) : editForm.stock_value;
+                             setEditForm({ ...editForm, stock_tons: v, stock_value: sv });
+                           }} /></div>
             <div className="fg-row"><label className="flbl">Stock Value (₹)</label>
-              <input type="number" min="0" value={editForm.stock_value} onChange={e => setEditForm({ ...editForm, stock_value: parseFloat(e.target.value) || 0 })} placeholder="Auto-calculated" /></div>
+              <NumberInput mode="decimal" value={editForm.stock_value}
+                           onChange={v => setEditForm({ ...editForm, stock_value: v })}
+                           placeholder="Auto-calculated" /></div>
           </div>
           <div className="fg-row"><label className="flbl">Minimum Stock Alert (CFT)</label>
-            <input type="number" min="0" step="0.001" value={editForm.min_stock} onChange={e => setEditForm({ ...editForm, min_stock: parseFloat(e.target.value) || 0 })} placeholder="Alert when stock falls below this level" /></div>
+            <NumberInput mode="decimal" value={editForm.min_stock}
+                         onChange={v => setEditForm({ ...editForm, min_stock: v })}
+                         placeholder="Alert when stock falls below this level" /></div>
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
             <button className="btn btnp" style={{ flex: 1 }} onClick={saveMat}>{editForm.id ? 'Update Material' : 'Add Material'}</button>
             <button className="btn" onClick={() => setEditForm(null)}>Cancel</button>
@@ -213,19 +301,23 @@ export default function MaterialsPage() {
               </div>
             </div>
             <div className="fg-row"><label className="flbl">Quantity to Add (CFT) <span className="req">*</span></label>
-              <input type="number" min="0" step="0.001" value={stockForm.qty} onChange={e => {
-                const q = parseFloat(e.target.value) || 0;
-                const r = parseFloat(stockForm.rate) || 0;
-                setStockForm({ ...stockForm, qty: e.target.value, sv: q > 0 && r > 0 ? (q * r).toFixed(0) : stockForm.sv });
-              }} placeholder="0.000" /></div>
+              <NumberInput mode="decimal" value={stockForm.qty}
+                           onChange={v => {
+                             const q = parseFloat(v) || 0;
+                             const r = parseFloat(stockForm.rate) || 0;
+                             setStockForm({ ...stockForm, qty: v, sv: q > 0 && r > 0 ? (q * r).toFixed(0) : stockForm.sv });
+                           }} placeholder="0.000" /></div>
             <div className="fg-row"><label className="flbl">Purchase Rate (₹/CFT)</label>
-              <input type="number" min="0" step="0.01" value={stockForm.rate} onChange={e => {
-                const r = parseFloat(e.target.value) || 0;
-                const q = parseFloat(stockForm.qty) || 0;
-                setStockForm({ ...stockForm, rate: e.target.value, sv: q > 0 && r > 0 ? (q * r).toFixed(0) : stockForm.sv });
-              }} /></div>
+              <NumberInput mode="decimal" value={stockForm.rate}
+                           onChange={v => {
+                             const r = parseFloat(v) || 0;
+                             const q = parseFloat(stockForm.qty) || 0;
+                             setStockForm({ ...stockForm, rate: v, sv: q > 0 && r > 0 ? (q * r).toFixed(0) : stockForm.sv });
+                           }} /></div>
             <div className="fg-row"><label className="flbl">Stock Value Added (₹)</label>
-              <input type="number" value={stockForm.sv} onChange={e => setStockForm({ ...stockForm, sv: e.target.value })} placeholder="Auto-calculated from qty × rate" /></div>
+              <NumberInput mode="decimal" value={stockForm.sv}
+                           onChange={v => setStockForm({ ...stockForm, sv: v })}
+                           placeholder="Auto-calculated from qty × rate" /></div>
             <div className="fg-row"><label className="flbl">Note (Supplier, Purchase Date, etc.)</label>
               <input type="text" value={stockForm.note} onChange={e => setStockForm({ ...stockForm, note: e.target.value })} placeholder="e.g. Purchased from XYZ Quarry" /></div>
             <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
@@ -235,6 +327,17 @@ export default function MaterialsPage() {
           </Modal>
         );
       })()}
+
+      {confirmDel && (
+        <ConfirmDialog
+          title="Delete material?"
+          message={`Permanently delete "${confirmDel.name}"?\n\nThis material has no linked slips, invoices, purchases, or trips. The action cannot be undone.`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={performDelete}
+          onCancel={() => setConfirmDel(null)}
+        />
+      )}
     </>
   );
 }
