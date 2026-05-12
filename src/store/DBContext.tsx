@@ -82,6 +82,35 @@ function reconcileBidirectionalLinks(db: DBShape): boolean {
 }
 
 function migrate(db: DBShape): DBShape {
+  // ─── Step 1: backfill missing top-level arrays / objects FIRST ───
+  // This must come before any .forEach iteration below. A corrupt or partial Supabase
+  // row that's missing one of these arrays would otherwise throw "Cannot read forEach
+  // of undefined", which would abort migrate() between setDbState and setReady(true)
+  // and leave the WorkspaceGate stuck on the loading spinner — making every feature
+  // appear broken.
+  if (!Array.isArray(db.materials)) db.materials = [];
+  if (!Array.isArray(db.parties)) db.parties = [];
+  if (!Array.isArray(db.slips)) db.slips = [];
+  if (!Array.isArray(db.invoices)) db.invoices = [];
+  if (!Array.isArray(db.ledger)) db.ledger = [];
+  if (!Array.isArray(db.vehicles)) db.vehicles = [];
+  if (!Array.isArray(db.drivers)) db.drivers = [];
+  if (!Array.isArray(db.trips)) db.trips = [];
+  if (!Array.isArray(db.fuel_logs)) db.fuel_logs = [];
+  if (!Array.isArray(db.maintenance_logs)) db.maintenance_logs = [];
+  if (!Array.isArray(db.tyre_logs)) db.tyre_logs = [];
+  if (!Array.isArray(db.expenses)) db.expenses = [];
+  if (!Array.isArray(db.suppliers)) db.suppliers = [];
+  if (!Array.isArray(db.purchases)) db.purchases = [];
+  if (!db.bizInfo) db.bizInfo = { ...DEFAULT_DB.bizInfo };
+  if (!db.counters) db.counters = { ...DEFAULT_DB.counters };
+  // Old DBs may be missing newer counter keys — fill from defaults without overwriting existing.
+  const c = db.counters as any;
+  for (const k of Object.keys(DEFAULT_DB.counters) as (keyof typeof DEFAULT_DB.counters)[]) {
+    if (c[k] === undefined) c[k] = DEFAULT_DB.counters[k];
+  }
+
+  // ─── Step 2: per-row field backfills ───
   db.materials.forEach(m => {
     if (m.stock_tons === undefined) m.stock_tons = 0;
     if (m.stock_value === undefined) m.stock_value = 0;
@@ -99,24 +128,6 @@ function migrate(db: DBShape): DBShape {
   db.slips.forEach(s => { if (s.gst_enabled === undefined) s.gst_enabled = true; });
   db.invoices.forEach(i => { if (i.gst_enabled === undefined) i.gst_enabled = true; });
 
-  // Backfill new top-level arrays + counters introduced by the fleet/inventory upgrade.
-  if (!db.vehicles) db.vehicles = [];
-  if (!db.drivers) db.drivers = [];
-  if (!db.trips) db.trips = [];
-  if (!db.fuel_logs) db.fuel_logs = [];
-  if (!db.maintenance_logs) db.maintenance_logs = [];
-  if (!db.tyre_logs) db.tyre_logs = [];
-  if (!db.expenses) db.expenses = [];
-  if (!db.suppliers) db.suppliers = [];
-  if (!db.purchases) db.purchases = [];
-
-  if (!db.bizInfo) db.bizInfo = { ...DEFAULT_DB.bizInfo };
-  if (!db.counters) db.counters = { ...DEFAULT_DB.counters };
-  // Old DBs may be missing newer counter keys — fill from defaults without overwriting existing.
-  const c = db.counters as any;
-  for (const k of Object.keys(DEFAULT_DB.counters) as (keyof typeof DEFAULT_DB.counters)[]) {
-    if (c[k] === undefined) c[k] = DEFAULT_DB.counters[k];
-  }
   // Heal any stale bidirectional Vehicle↔Driver links left behind by older save paths.
   reconcileBidirectionalLinks(db);
   return db;
@@ -178,13 +189,24 @@ export function DBProvider({ children }: { children: ReactNode }) {
     }
 
     if (data?.data) {
-      const migrated = migrate(data.data as DBShape);
-      setDbState(migrated);
-      // Allow the next debounced save to fire so any reconciliation performed by migrate
-      // (e.g. healing stale Vehicle↔Driver back-pointers in pre-existing data) is written
-      // back to Supabase. Without this, the heal lives only in memory until the user
-      // makes another change, and a fresh load on another device would see the same rot.
-      skipNextSaveRef.current = false;
+      // Wrap migrate in try/catch so a malformed Supabase row can never strand the user
+      // on the loading spinner. If migration itself throws, fall back to defaults and
+      // surface a toast — at least the app becomes usable, and the user can re-import
+      // a backup or contact support without being completely locked out.
+      try {
+        const migrated = migrate(data.data as DBShape);
+        setDbState(migrated);
+        // Allow the next debounced save to fire so any reconciliation performed by migrate
+        // (e.g. healing stale Vehicle↔Driver back-pointers in pre-existing data) is written
+        // back to Supabase. Without this, the heal lives only in memory until the user
+        // makes another change, and a fresh load on another device would see the same rot.
+        skipNextSaveRef.current = false;
+      } catch (e: any) {
+        console.error('migrate() failed', e);
+        toast(`Could not parse your saved data: ${e?.message || 'unknown error'}. Falling back to defaults.`, 'error', 8000);
+        setDbState(DEFAULT_DB);
+        skipNextSaveRef.current = true; // do NOT overwrite the bad row with defaults automatically
+      }
       setReady(true);
       return;
     }
