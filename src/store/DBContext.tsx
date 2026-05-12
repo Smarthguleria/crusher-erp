@@ -43,6 +43,44 @@ const DEFAULT_DB: DBShape = {
   },
 };
 
+// Defensive reconciliation of the Vehicle↔Driver 1:1 link. This relationship is mirrored
+// on both sides (vehicle.driver_id and driver.vehicle_id), which means it can drift if
+// any historical save path forgot to update one side. We re-run this on every load so
+// any past corruption (e.g. data written before the bidirectional-cleanup fix landed)
+// gets silently healed, and the resulting state is persisted so the heal is permanent.
+// Strategy: vehicles are the source of truth; driver.vehicle_id is derived from them.
+function reconcileBidirectionalLinks(db: DBShape): boolean {
+  let changed = false;
+
+  // Pass 1: any driver pointing at a vehicle that doesn't claim them → clear.
+  db.drivers.forEach(d => {
+    if (d.vehicle_id == null) return;
+    const v = db.vehicles.find(x => x.vehicle_id === d.vehicle_id);
+    if (!v || v.driver_id !== d.driver_id) {
+      d.vehicle_id = undefined;
+      changed = true;
+    }
+  });
+
+  // Pass 2: any vehicle pointing at a non-existent driver → clear. Otherwise make the
+  // driver point back. If two vehicles claim the same driver, the last one wins for the
+  // driver's back-pointer (deterministic but the duplicate-claim is still detectable via
+  // delete-link checks — both vehicles will still show "1 driver assignment").
+  db.vehicles.forEach(v => {
+    if (v.driver_id == null) return;
+    const d = db.drivers.find(x => x.driver_id === v.driver_id);
+    if (!d) {
+      v.driver_id = undefined;
+      changed = true;
+    } else if (d.vehicle_id !== v.vehicle_id) {
+      d.vehicle_id = v.vehicle_id;
+      changed = true;
+    }
+  });
+
+  return changed;
+}
+
 function migrate(db: DBShape): DBShape {
   db.materials.forEach(m => {
     if (m.stock_tons === undefined) m.stock_tons = 0;
@@ -79,6 +117,8 @@ function migrate(db: DBShape): DBShape {
   for (const k of Object.keys(DEFAULT_DB.counters) as (keyof typeof DEFAULT_DB.counters)[]) {
     if (c[k] === undefined) c[k] = DEFAULT_DB.counters[k];
   }
+  // Heal any stale bidirectional Vehicle↔Driver links left behind by older save paths.
+  reconcileBidirectionalLinks(db);
   return db;
 }
 
@@ -138,7 +178,13 @@ export function DBProvider({ children }: { children: ReactNode }) {
     }
 
     if (data?.data) {
-      setDbState(migrate(data.data as DBShape));
+      const migrated = migrate(data.data as DBShape);
+      setDbState(migrated);
+      // Allow the next debounced save to fire so any reconciliation performed by migrate
+      // (e.g. healing stale Vehicle↔Driver back-pointers in pre-existing data) is written
+      // back to Supabase. Without this, the heal lives only in memory until the user
+      // makes another change, and a fresh load on another device would see the same rot.
+      skipNextSaveRef.current = false;
       setReady(true);
       return;
     }

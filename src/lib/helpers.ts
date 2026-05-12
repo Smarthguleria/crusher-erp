@@ -128,26 +128,34 @@ export function supplierHasLinkedRecords(db: DBShape, supplierId: number) {
 }
 
 // ───────────────────── Expiry status (vehicle docs, driver license) ─────────────────────
-// Returns one of: 'expired' (already past), 'soon' (within 30 days), 'ok' (>30 days),
-// or 'unknown' (no date set). Used for status pills and dashboard alerts.
-export type ExpiryStatus = 'expired' | 'soon' | 'ok' | 'unknown';
-export function expiryStatus(iso?: string | null, soonDays = 30): ExpiryStatus {
+// Three-tier window:
+//   'expired'  — date is already past (red).
+//   'critical' — ≤7 days remaining (urgent red, must renew immediately).
+//   'soon'     — 8–30 days remaining (amber warning).
+//   'ok'       — >30 days, no badge urgency (green).
+//   'unknown'  — no date set / unparseable date.
+export type ExpiryStatus = 'expired' | 'critical' | 'soon' | 'ok' | 'unknown';
+export function expiryStatus(iso?: string | null, soonDays = 30, criticalDays = 7): ExpiryStatus {
   if (!iso) return 'unknown';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return 'unknown';
   const now = new Date();
   const diffDays = Math.ceil((d.getTime() - now.getTime()) / 86_400_000);
   if (diffDays < 0) return 'expired';
+  if (diffDays <= criticalDays) return 'critical';
   if (diffDays <= soonDays) return 'soon';
   return 'ok';
 }
 export const expiryBadge = (s: ExpiryStatus) =>
-  s === 'expired' ? 'br' : s === 'soon' ? 'ba' : s === 'ok' ? 'bg' : 'badge-gray';
+  s === 'expired' ? 'br' : s === 'critical' ? 'br' : s === 'soon' ? 'ba' : s === 'ok' ? 'bg' : 'badge-gray';
 export const expiryLabel = (s: ExpiryStatus, iso?: string | null) => {
   if (s === 'unknown') return '—';
   if (!iso) return '—';
   const d = new Date(iso).toLocaleDateString('en-IN');
-  return s === 'expired' ? `Expired (${d})` : s === 'soon' ? `Due soon (${d})` : d;
+  return s === 'expired' ? `Expired (${d})`
+    : s === 'critical' ? `⚠ Urgent (${d})`
+    : s === 'soon' ? `Due soon (${d})`
+    : d;
 };
 
 // ───────────────────── Fuel / fleet analytics ─────────────────────

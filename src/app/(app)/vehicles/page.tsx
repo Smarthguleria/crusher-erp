@@ -51,17 +51,19 @@ export default function VehiclesPage() {
     );
   }, [db.vehicles, search]);
 
-  // Aggregate alert counts for the header strip.
+  // Aggregate alert counts for the header strip. 'critical' (≤7 days) bumps the urgent
+  // count alongside expired so the operator sees the most time-sensitive items first.
   const alertStats = useMemo(() => {
-    let expired = 0, soon = 0;
+    let expired = 0, critical = 0, soon = 0;
     db.vehicles.forEach(v => {
       [v.insurance_expiry, v.fitness_expiry, v.pollution_expiry].forEach(d => {
         const s = expiryStatus(d);
         if (s === 'expired') expired++;
+        else if (s === 'critical') critical++;
         else if (s === 'soon') soon++;
       });
     });
-    return { expired, soon };
+    return { expired, critical, soon };
   }, [db.vehicles]);
 
   const open = (v?: Vehicle) => {
@@ -176,12 +178,12 @@ export default function VehiclesPage() {
           <div className="sval-sub">of {db.vehicles.length} total</div>
         </div>
         <div className="stat stat-red">
-          <div className="slbl">⚠ Expired Documents</div>
-          <div className="sval-sm tx-dr">{alertStats.expired}</div>
-          <div className="sval-sub">Insurance / Fitness / Pollution</div>
+          <div className="slbl">⚠ Urgent (expired + ≤7d)</div>
+          <div className="sval-sm tx-dr">{alertStats.expired + alertStats.critical}</div>
+          <div className="sval-sub">{alertStats.expired} expired · {alertStats.critical} due ≤7d</div>
         </div>
         <div className="stat stat-amber">
-          <div className="slbl">🟡 Expiring Soon (30d)</div>
+          <div className="slbl">🟡 Expiring Soon (8–30d)</div>
           <div className="sval-sm tx-pd">{alertStats.soon}</div>
           <div className="sval-sub">Renew before expiry</div>
         </div>

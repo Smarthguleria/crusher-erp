@@ -55,16 +55,17 @@ export default function DashboardPage() {
   const lowStockMats = db.materials.filter(m => (m.min_stock || 0) > 0 && stockRemaining(db, m.id) <= (m.min_stock || 0));
 
   // Document expiry alerts across the fleet (insurance / fitness / pollution / license).
+  // Anything not 'ok' or 'unknown' counts — critical and expired are urgent.
   let docAlerts = 0;
   db.vehicles.forEach(v => {
     [v.insurance_expiry, v.fitness_expiry, v.pollution_expiry].forEach(d => {
       const s = expiryStatus(d);
-      if (s === 'expired' || s === 'soon') docAlerts++;
+      if (s === 'expired' || s === 'critical' || s === 'soon') docAlerts++;
     });
   });
   db.drivers.forEach(d => {
     const s = expiryStatus(d.license_expiry);
-    if (s === 'expired' || s === 'soon') docAlerts++;
+    if (s === 'expired' || s === 'critical' || s === 'soon') docAlerts++;
   });
 
   const chartLabels: string[] = [];

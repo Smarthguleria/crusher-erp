@@ -46,7 +46,7 @@ export default function MaintenancePage() {
   const upcoming = useMemo(() => {
     return db.maintenance_logs
       .filter(m => m.next_service_due)
-      .filter(m => ['expired', 'soon'].includes(expiryStatus(m.next_service_due)))
+      .filter(m => ['expired', 'critical', 'soon'].includes(expiryStatus(m.next_service_due)))
       .sort((a, b) => new Date(a.next_service_due!).getTime() - new Date(b.next_service_due!).getTime());
   }, [db.maintenance_logs]);
 
