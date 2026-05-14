@@ -6,7 +6,7 @@ import { useToast } from '@/store/ToastContext';
 import Modal from '@/components/Modal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import NumberInput from '@/components/NumberInput';
-import { expiryBadge, expiryLabel, expiryStatus, isValidPhone, vehicleHasLinkedRecords, vehicleMileage } from '@/lib/helpers';
+import { expiryBadge, expiryLabel, expiryStatus, isValidPhone, recordAssignmentChange, vehicleHasLinkedRecords, vehicleMileage } from '@/lib/helpers';
 import type { Vehicle } from '@/lib/types';
 
 interface VehicleForm {
@@ -94,7 +94,7 @@ export default function VehiclesPage() {
     if (form.phone && !isValidPhone(form.phone)) { toast('Phone must be 10 digits (starts 6-9)', 'error'); return; }
 
     setDb(prev => {
-      const next = { ...prev, vehicles: [...prev.vehicles], drivers: [...prev.drivers], counters: { ...prev.counters } };
+      const next = { ...prev, vehicles: [...prev.vehicles], drivers: [...prev.drivers], vehicle_assignments: [...prev.vehicle_assignments], counters: { ...prev.counters } };
       const id = form.vehicle_id || (next.counters.vehicle++);
       const data: Vehicle = {
         vehicle_id: id,
@@ -132,6 +132,8 @@ export default function VehiclesPage() {
         // Vehicle now has no driver — clear any driver that was previously pointing here.
         next.drivers.forEach(d => { if (d.vehicle_id === id) d.vehicle_id = undefined; });
       }
+      // Audit trail: open / close history rows to mirror the new live pairing.
+      recordAssignmentChange(next);
       return next;
     });
     toast(form.vehicle_id ? 'Vehicle updated!' : 'Vehicle added!', 'success');

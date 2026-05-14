@@ -7,12 +7,13 @@ import Modal from '@/components/Modal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import NumberInput from '@/components/NumberInput';
 import DateFilter from '@/components/DateFilter';
-import { dateRangeFilter, fmt, fmt2, isPositiveNumber, today } from '@/lib/helpers';
+import { dateRangeFilter, extractLocalTime, fmt, fmt2, fmtDateTime12, isPositiveNumber, nowTime, today } from '@/lib/helpers';
 import type { Purchase } from '@/lib/types';
 
 interface PurchaseForm {
   purchase_id?: number;
-  date: string;
+  date: string;   // yyyy-mm-dd (HTML <input type="date">)
+  time: string;   // HH:MM 24h (HTML <input type="time">) — displayed as 12h AM/PM
   supplier_id: string;
   supplier_name: string;
   material_id: string;
@@ -28,7 +29,7 @@ interface PurchaseForm {
 }
 
 const EMPTY: PurchaseForm = {
-  date: today(), supplier_id: '', supplier_name: '', material_id: '',
+  date: today(), time: nowTime(), supplier_id: '', supplier_name: '', material_id: '',
   vehicle_number: '', driver_name: '', quantity: '', unit: 'CFT', rate: '',
   total_amount: '', royalty_number: '', weighbridge_slip: '', notes: '',
 };
@@ -58,6 +59,7 @@ export default function PurchasesPage() {
       setForm({
         purchase_id: p.purchase_id,
         date: p.date.split('T')[0],
+        time: extractLocalTime(p.date) || nowTime(),
         supplier_id: p.supplier_id ? String(p.supplier_id) : '',
         supplier_name: p.supplier_name || '',
         material_id: String(p.material_id),
@@ -90,9 +92,15 @@ export default function PurchasesPage() {
       const total = form.total_amount ? parseFloat(form.total_amount) : (qty * rate);
       const matId = parseInt(form.material_id);
 
+      // Combine the form's date (yyyy-mm-dd) and time (HH:MM, 24h) into a local-time
+      // Date object, then store as ISO. `new Date('yyyy-mm-ddTHH:MM')` is interpreted as
+      // local time per the spec, which is what we want — the user typed a wall-clock time.
+      const dt = form.time
+        ? new Date(`${form.date}T${form.time}`)
+        : new Date(form.date);
       const data: Purchase = {
         purchase_id: id,
-        date: new Date(form.date).toISOString(),
+        date: (isNaN(dt.getTime()) ? new Date(form.date) : dt).toISOString(),
         supplier_id: form.supplier_id ? parseInt(form.supplier_id) : undefined,
         supplier_name: form.supplier_name.trim() || undefined,
         material_id: matId,
@@ -174,6 +182,7 @@ export default function PurchasesPage() {
         <DateFilter onChange={(f, t) => { setFrom(f); setTo(t); }} />
       </div>
       <div className="filter-bar" style={{ marginBottom: 12 }}>
+        <button className="btn btn-sm" onClick={() => { const t = today(); setFrom(t); setTo(t); }}>Today</button>
         <select value={matFilter} onChange={e => setMatFilter(e.target.value)} style={{ width: 170 }}>
           <option value="all">All Materials</option>
           {db.materials.map(m => <option key={m.id} value={m.id}>{m.material_name}</option>)}
@@ -194,7 +203,7 @@ export default function PurchasesPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Date</th><th>Purchase #</th><th>Supplier</th><th>Material</th>
+                  <th>Date &amp; Time</th><th>Purchase #</th><th>Supplier</th><th>Material</th>
                   <th>Vehicle</th><th>Qty</th><th>Rate</th><th>Total</th>
                   <th>Royalty</th><th>Actions</th>
                 </tr>
@@ -205,7 +214,7 @@ export default function PurchasesPage() {
                   const m = db.materials.find(x => x.id === p.material_id);
                   return (
                     <tr key={p.purchase_id}>
-                      <td style={{ fontSize: 11, color: 'var(--text3)' }}>{new Date(p.date).toLocaleDateString('en-IN')}</td>
+                      <td style={{ fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDateTime12(p.date)}</td>
                       <td className="mono" style={{ fontWeight: 700, fontSize: 11 }}>P-{p.purchase_id}</td>
                       <td style={{ fontSize: 12 }}>{sup?.supplier_name || p.supplier_name || '—'}</td>
                       <td><span className="badge bg">{m?.material_name || '—'}</span></td>
@@ -236,22 +245,27 @@ export default function PurchasesPage() {
               <input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
             </div>
             <div className="fg-row">
+              <label className="flbl">Time <span className="req">*</span></label>
+              <input type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} />
+              <div className="field-hint">Displayed in 12-hour AM/PM format on slips and reports.</div>
+            </div>
+            <div className="fg-row">
               <label className="flbl">Material <span className="req">*</span></label>
               <select value={form.material_id} onChange={e => setForm({ ...form, material_id: e.target.value })}>
                 <option value="">— Select —</option>
                 {db.materials.map(m => <option key={m.id} value={m.id}>{m.material_name}</option>)}
               </select>
             </div>
-            <div className="fg-row">
-              <label className="flbl">Supplier (master)</label>
-              <select value={form.supplier_id} onChange={e => {
-                const s = db.suppliers.find(x => x.supplier_id === parseInt(e.target.value));
-                setForm({ ...form, supplier_id: e.target.value, supplier_name: s?.supplier_name || form.supplier_name });
-              }}>
-                <option value="">— Free text below —</option>
-                {db.suppliers.map(s => <option key={s.supplier_id} value={s.supplier_id}>{s.supplier_name}</option>)}
-              </select>
-            </div>
+          </div>
+          <div className="fg-row">
+            <label className="flbl">Supplier (master)</label>
+            <select value={form.supplier_id} onChange={e => {
+              const s = db.suppliers.find(x => x.supplier_id === parseInt(e.target.value));
+              setForm({ ...form, supplier_id: e.target.value, supplier_name: s?.supplier_name || form.supplier_name });
+            }}>
+              <option value="">— Free text below —</option>
+              {db.suppliers.map(s => <option key={s.supplier_id} value={s.supplier_id}>{s.supplier_name}</option>)}
+            </select>
           </div>
           <div className="fg-row">
             <label className="flbl">Supplier Name (free text)</label>

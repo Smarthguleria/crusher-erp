@@ -8,12 +8,13 @@ import PaymentSelector from '@/components/PaymentSelector';
 import SharePanel from '@/components/SharePanel';
 import SlipDocument from '@/components/SlipDocument';
 import NumberInput from '@/components/NumberInput';
+import DimensionInput, { toDecimalFeet } from '@/components/DimensionInput';
 import {
   calcGST, today, fmt2, getPartyRate, gstTypeBadge, gstTypeLabel, isPositiveNumber, payClass, payLabel, stockRemaining,
 } from '@/lib/helpers';
 import type { PaymentStatus, PaymentMode, Slip, LedgerEntry } from '@/lib/types';
 
-type CftUnit = 'in' | 'ft' | 'cm' | 'mt' | 'cft';
+type CftMode = 'ft_in' | 'cft';
 
 export default function SlipPage() {
   const { db, setDb } = useDB();
@@ -31,10 +32,13 @@ export default function SlipPage() {
   // Per-slip GST override. Defaults to the selected party's gst_enabled setting.
   const [gstEnabled, setGstEnabled] = useState<boolean>(true);
 
-  const [cftUnit, setCftUnit] = useState<CftUnit>('in');
-  const [cftL, setCftL] = useState<string>('');
-  const [cftW, setCftW] = useState<string>('');
-  const [cftH, setCftH] = useState<string>('');
+  // CFT helper: ft+in pair per dimension, or a direct CFT override. Replaces the
+  // legacy single-unit selector (which produced rounding errors when users entered
+  // inches or centimetres).
+  const [cftMode, setCftMode] = useState<CftMode>('ft_in');
+  const [lFt, setLFt] = useState(''); const [lIn, setLIn] = useState('');
+  const [wFt, setWFt] = useState(''); const [wIn, setWIn] = useState('');
+  const [hFt, setHFt] = useState(''); const [hIn, setHIn] = useState('');
   const [cftDirect, setCftDirect] = useState<string>('');
 
   const [generated, setGenerated] = useState<Slip | null>(null);
@@ -70,15 +74,13 @@ export default function SlipPage() {
   };
 
   const calcCftValue = (): number => {
-    const toFt = (v: number) =>
-      cftUnit === 'in' ? v / 12 :
-      cftUnit === 'ft' ? v :
-      cftUnit === 'cm' ? v / 30.48 :
-      cftUnit === 'mt' ? v * 3.28084 : v;
-    if (cftUnit === 'cft') return parseFloat(cftDirect) || 0;
-    const l = parseFloat(cftL) || 0, w = parseFloat(cftW) || 0, h = parseFloat(cftH) || 0;
-    if (l <= 0 || w <= 0 || h <= 0) return 0;
-    return parseFloat((toFt(l) * toFt(w) * toFt(h)).toFixed(3));
+    if (cftMode === 'cft') return parseFloat(cftDirect) || 0;
+    const lf = toDecimalFeet(lFt, lIn);
+    const wf = toDecimalFeet(wFt, wIn);
+    const hf = toDecimalFeet(hFt, hIn);
+    if (lf <= 0 || wf <= 0 || hf <= 0) return 0;
+    // Round to 2 decimal places to match the user-facing test case (807.61 CFT).
+    return parseFloat((lf * wf * hf).toFixed(2));
   };
 
   const cftPreview = calcCftValue();
@@ -190,11 +192,9 @@ export default function SlipPage() {
   if (generated) return <SlipResult slip={generated} onNew={() => {
     setGenerated(null);
     setVehicle(''); setDriver(''); setPartyId(''); setMatId(''); setRate(''); setQty('');
-    setCftL(''); setCftW(''); setCftH(''); setCftDirect('');
+    setLFt(''); setLIn(''); setWFt(''); setWIn(''); setHFt(''); setHIn(''); setCftDirect('');
     setPaymentStatus('pending'); setPaymentMode(null);
   }} />;
-
-  const cftLabels: Record<CftUnit, string> = { in: 'in', ft: 'ft', cm: 'cm', mt: 'm', cft: 'CFT' };
 
   return (
     <>
@@ -296,37 +296,30 @@ export default function SlipPage() {
 
           <div style={{ background: 'linear-gradient(135deg,#EBF2FB,#f0f6ff)', border: '1px solid #b8d4f0', borderRadius: 'var(--r)', padding: 14, marginBottom: 13 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--blue)' }}>📐 CFT Calculator — L × W × H</div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--blue)' }}>📐 CFT Calculator — L × W × H (feet + inches)</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)' }}>Input unit:</span>
-                <select value={cftUnit} onChange={e => setCftUnit(e.target.value as CftUnit)} style={{ padding: '3px 7px', fontSize: 11.5, fontWeight: 700, width: 'auto', borderRadius: 6 }}>
-                  <option value="in">Inches (in)</option>
-                  <option value="ft">Feet (ft)</option>
-                  <option value="cm">Centimetres (cm)</option>
-                  <option value="mt">Metres (m)</option>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)' }}>Input mode:</span>
+                <select value={cftMode} onChange={e => setCftMode(e.target.value as CftMode)} style={{ padding: '3px 7px', fontSize: 11.5, fontWeight: 700, width: 'auto', borderRadius: 6 }}>
+                  <option value="ft_in">Feet + Inches</option>
                   <option value="cft">Direct CFT</option>
                 </select>
               </div>
             </div>
-            {cftUnit !== 'cft' ? (
+            {cftMode === 'ft_in' ? (
               <div className="g3" style={{ gap: 8, marginBottom: 10 }}>
-                <div>
-                  <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Length ({cftLabels[cftUnit]})</label>
-                  <NumberInput mode="decimal" value={cftL} onChange={setCftL} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Width ({cftLabels[cftUnit]})</label>
-                  <NumberInput mode="decimal" value={cftW} onChange={setCftW} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Height ({cftLabels[cftUnit]})</label>
-                  <NumberInput mode="decimal" value={cftH} onChange={setCftH} placeholder="0" style={{ padding: '6px 9px', fontSize: 12 }} />
-                </div>
+                <DimensionInput label="Length" feet={lFt} inches={lIn} onFeetChange={setLFt} onInchesChange={setLIn} />
+                <DimensionInput label="Width" feet={wFt} inches={wIn} onFeetChange={setWFt} onInchesChange={setWIn} />
+                <DimensionInput label="Height" feet={hFt} inches={hIn} onFeetChange={setHFt} onInchesChange={setHIn} />
               </div>
             ) : (
               <div style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>CFT Value</label>
                 <NumberInput mode="decimal" value={cftDirect} onChange={setCftDirect} placeholder="Enter cubic feet directly" style={{ padding: '6px 9px', fontSize: 12, maxWidth: 220 }} />
+              </div>
+            )}
+            {cftMode === 'ft_in' && cftPreview > 0 && (
+              <div style={{ fontSize: 10.5, color: 'var(--text3)', marginBottom: 8 }}>
+                Decimal feet: {toDecimalFeet(lFt, lIn).toFixed(4)} × {toDecimalFeet(wFt, wIn).toFixed(4)} × {toDecimalFeet(hFt, hIn).toFixed(4)}
               </div>
             )}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>

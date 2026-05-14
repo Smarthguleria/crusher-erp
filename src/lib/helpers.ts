@@ -15,6 +15,34 @@ export const fmtMT = (n: number) =>
 
 export const today = () => new Date().toISOString().split('T')[0];
 
+// Local HH:MM in 24-hour format (matches HTML <input type="time"> value format).
+export const nowTime = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+// Format an ISO datetime string as "DD-MM-YYYY · HH:MM AM/PM" in the user's local time.
+// Used by Purchase entries (and anywhere else we need a printed timestamp with AM/PM).
+export function fmtDateTime12(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yy = d.getFullYear();
+  let h = d.getHours();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  const mins = String(d.getMinutes()).padStart(2, '0');
+  return `${dd}-${mm}-${yy} · ${String(h).padStart(2, '0')}:${mins} ${ampm}`;
+}
+
+// Extract the HH:MM portion of an ISO datetime in the user's local time for re-editing.
+export function extractLocalTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 export function calcGST(qty: number, rate: number, gstPct: number, partyState: string, gstEnabled = true) {
   const base = parseFloat((qty * rate).toFixed(2));
   // gst_enabled = false → no tax at all; total = subtotal.
@@ -57,6 +85,45 @@ export const stockRemaining = (db: DBShape, mid: number) => {
   const m = db.materials.find(x => x.id === mid);
   return Math.max(0, (m ? m.stock_tons : 0) - stockSold(db, mid));
 };
+
+// Sales / inventory analytics for a single material. Used by the Materials page
+// summary strip and per-row breakdown.
+//   purchased_qty / purchased_value — sum from Purchases module entries.
+//   sold_qty / sold_value           — sum from Invoices (taxable base, no GST).
+//   avg_purchase_rate               — weighted average from purchase entries.
+//   current_stock_value             — remaining qty × avg purchase rate.
+//   est_profit                      — sold_value − (sold_qty × avg_purchase_rate).
+export function materialAnalytics(db: DBShape, mid: number) {
+  const purchases = db.purchases.filter(p => p.material_id === mid);
+  const purchasedQty = purchases.reduce((a, p) => a + p.quantity, 0);
+  const purchasedValue = purchases.reduce((a, p) => a + p.total_amount, 0);
+  const avgPurchaseRate = purchasedQty > 0 ? purchasedValue / purchasedQty : 0;
+
+  // Sold qty comes from invoices (post-billing); falls back to slip totals for any
+  // sale that hasn't been formally invoiced yet. We dedupe by slip_id because every
+  // invoice is linked to a slip and we want each sale counted once.
+  const invoicedSlipIds = new Set(db.invoices.map(i => i.slip_id));
+  const soldFromInvoices = db.invoices
+    .filter(i => i.material_id === mid)
+    .reduce((acc, i) => ({ qty: acc.qty + i.quantity, value: acc.value + i.base_amount }), { qty: 0, value: 0 });
+  const soldFromUninvoicedSlips = db.slips
+    .filter(s => s.material_id === mid && !invoicedSlipIds.has(s.slip_id))
+    .reduce((acc, s) => ({ qty: acc.qty + s.quantity, value: acc.value + s.base_amount }), { qty: 0, value: 0 });
+  const soldQty = soldFromInvoices.qty + soldFromUninvoicedSlips.qty;
+  const soldValue = soldFromInvoices.value + soldFromUninvoicedSlips.value;
+
+  const remaining = stockRemaining(db, mid);
+  const currentStockValue = remaining * avgPurchaseRate;
+  const costOfGoodsSold = soldQty * avgPurchaseRate;
+  const estProfit = soldValue - costOfGoodsSold;
+
+  return {
+    purchasedQty, purchasedValue, avgPurchaseRate,
+    soldQty, soldValue,
+    remaining, currentStockValue,
+    costOfGoodsSold, estProfit,
+  };
+}
 
 export const payLabel = (p: PaymentStatus) =>
   p === 'paid' ? 'Paid' : p === 'pending' ? 'Pending' : 'Debt';
@@ -157,6 +224,49 @@ export const expiryLabel = (s: ExpiryStatus, iso?: string | null) => {
     : s === 'soon' ? `Due soon (${d})`
     : d;
 };
+
+// ───────────────────── Vehicle assignment lifecycle ─────────────────────
+// Reconcile the assignment-history audit trail against the current Vehicle↔Driver pairing.
+// Mutates `db.vehicle_assignments` and `db.counters.assignment`. Idempotent — running
+// it twice with no live-state change produces no new rows.
+//
+//   - When a vehicle now has a driver that isn't reflected by any active history row,
+//     open a new row.
+//   - When an active history row no longer matches the live pairing (either side
+//     reassigned or unassigned), close it (unassigned_at + status=inactive).
+//
+// Call this from every place that mutates vehicle.driver_id or driver.vehicle_id so
+// the audit trail stays consistent.
+export function recordAssignmentChange(db: DBShape): void {
+  const now = new Date().toISOString();
+  const active = db.vehicle_assignments.filter(a => a.status === 'active');
+
+  // Close any active row whose pairing is no longer live.
+  active.forEach(a => {
+    const v = db.vehicles.find(x => x.vehicle_id === a.vehicle_id);
+    if (!v || v.driver_id !== a.driver_id) {
+      a.status = 'inactive';
+      a.unassigned_at = now;
+    }
+  });
+
+  // Open a row for every live pairing that doesn't already have an active history row.
+  db.vehicles.forEach(v => {
+    if (v.driver_id == null) return;
+    const hasActive = db.vehicle_assignments.some(
+      a => a.status === 'active' && a.vehicle_id === v.vehicle_id && a.driver_id === v.driver_id
+    );
+    if (hasActive) return;
+    db.counters.assignment = (db.counters.assignment || 1);
+    db.vehicle_assignments.push({
+      assignment_id: db.counters.assignment++,
+      vehicle_id: v.vehicle_id,
+      driver_id: v.driver_id,
+      assigned_at: now,
+      status: 'active',
+    });
+  });
+}
 
 // ───────────────────── Fuel / fleet analytics ─────────────────────
 // Compute average mileage (KM/L) for a vehicle from its odometer-tagged fuel logs.

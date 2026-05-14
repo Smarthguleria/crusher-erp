@@ -22,6 +22,7 @@ const DEFAULT_DB: DBShape = {
   ledger: [],
   vehicles: [],
   drivers: [],
+  vehicle_assignments: [],
   trips: [],
   fuel_logs: [],
   maintenance_logs: [],
@@ -34,6 +35,7 @@ const DEFAULT_DB: DBShape = {
     vehicle: 1, driver: 1, trip: 1,
     fuel: 1, maint: 1, tyre: 1,
     expense: 1, supplier: 1, purchase: 1,
+    assignment: 1,
   },
   bizInfo: {
     name: 'Your Crusher & Aggregates',
@@ -95,6 +97,7 @@ function migrate(db: DBShape): DBShape {
   if (!Array.isArray(db.ledger)) db.ledger = [];
   if (!Array.isArray(db.vehicles)) db.vehicles = [];
   if (!Array.isArray(db.drivers)) db.drivers = [];
+  if (!Array.isArray(db.vehicle_assignments)) db.vehicle_assignments = [];
   if (!Array.isArray(db.trips)) db.trips = [];
   if (!Array.isArray(db.fuel_logs)) db.fuel_logs = [];
   if (!Array.isArray(db.maintenance_logs)) db.maintenance_logs = [];

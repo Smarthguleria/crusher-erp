@@ -125,6 +125,20 @@ export interface Driver {
   status: 'active' | 'inactive';
 }
 
+// Historical timeline of vehicle↔driver assignments. A new row is created when a
+// vehicle gets a driver; it is closed (unassigned_at set, status='inactive') when
+// the assignment is changed or cleared. The current live link is still tracked on
+// vehicle.driver_id / driver.vehicle_id — this table is an audit trail.
+export interface VehicleAssignment {
+  assignment_id: number;
+  vehicle_id: number;
+  driver_id: number;
+  assigned_at: string;        // ISO datetime
+  unassigned_at?: string;     // ISO datetime; absent while status='active'
+  status: 'active' | 'inactive';
+  notes?: string;
+}
+
 export interface Trip {
   trip_id: number;
   date: string;               // ISO datetime
@@ -234,6 +248,7 @@ export interface DBShape {
   ledger: LedgerEntry[];
   vehicles: Vehicle[];
   drivers: Driver[];
+  vehicle_assignments: VehicleAssignment[];
   trips: Trip[];
   fuel_logs: FuelLog[];
   maintenance_logs: MaintenanceLog[];
@@ -246,6 +261,7 @@ export interface DBShape {
     vehicle: number; driver: number; trip: number;
     fuel: number; maint: number; tyre: number;
     expense: number; supplier: number; purchase: number;
+    assignment: number;
   };
   bizInfo: BizInfo;
 }

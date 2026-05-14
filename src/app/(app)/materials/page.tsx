@@ -6,7 +6,7 @@ import { useToast } from '@/store/ToastContext';
 import Modal from '@/components/Modal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import NumberInput from '@/components/NumberInput';
-import { fmt, fmt2, isPositiveNumber, materialHasLinkedRecords, stockRemaining, stockSold } from '@/lib/helpers';
+import { fmt, fmt2, isPositiveNumber, materialAnalytics, materialHasLinkedRecords, stockRemaining, stockSold } from '@/lib/helpers';
 import type { Material } from '@/lib/types';
 
 interface MatForm {
@@ -38,6 +38,18 @@ export default function MaterialsPage() {
   const totalStock = db.materials.reduce((a, m) => a + (m.stock_tons || 0), 0);
   const totalValue = db.materials.reduce((a, m) => a + (m.stock_value || 0), 0);
   const totalSold = db.slips.reduce((a, s) => a + s.quantity, 0);
+
+  // Roll up sales analytics across every material so the header strip shows business-
+  // level KPIs (revenue, profit) alongside stock.
+  const fleetAnalytics = db.materials.reduce((acc, m) => {
+    const a = materialAnalytics(db, m.id);
+    return {
+      purchasedValue: acc.purchasedValue + a.purchasedValue,
+      soldValue: acc.soldValue + a.soldValue,
+      currentStockValue: acc.currentStockValue + a.currentStockValue,
+      estProfit: acc.estProfit + a.estProfit,
+    };
+  }, { purchasedValue: 0, soldValue: 0, currentStockValue: 0, estProfit: 0 });
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -147,10 +159,27 @@ export default function MaterialsPage() {
         <button className="btn btnp" onClick={() => openEdit()}>+ Add Material</button>
       </div>
 
-      <div className="g3" style={{ marginBottom: 14 }}>
-        <div className="stat stat-accent"><div className="slbl">Total Stock (All Materials)</div><div className="sval-sm">{(totalStock / 1000).toFixed(4)} MT</div><div className="sval-sub">{fmt2(totalStock)} CFT</div></div>
-        <div className="stat stat-blue"><div className="slbl">Total Stock Value</div><div className="sval-sm" style={{ color: 'var(--blue)' }}>₹{fmt(totalValue)}</div></div>
-        <div className="stat stat-red"><div className="slbl">Total Sold (All Time)</div><div className="sval-sm tx-dr">{(totalSold / 1000).toFixed(4)} MT</div><div className="sval-sub">{fmt2(totalSold)} CFT</div></div>
+      <div className="g4" style={{ marginBottom: 14 }}>
+        <div className="stat stat-accent">
+          <div className="slbl">📦 Stock On Hand</div>
+          <div className="sval-sm">{(totalStock / 1000).toFixed(4)} MT</div>
+          <div className="sval-sub">{fmt2(totalStock)} CFT · ₹{fmt(fleetAnalytics.currentStockValue || totalValue)}</div>
+        </div>
+        <div className="stat stat-blue">
+          <div className="slbl">📥 Purchase Spend (all time)</div>
+          <div className="sval-sm" style={{ color: 'var(--blue)' }}>₹{fmt(fleetAnalytics.purchasedValue)}</div>
+          <div className="sval-sub">across {db.purchases.length} purchase{db.purchases.length !== 1 ? 's' : ''}</div>
+        </div>
+        <div className="stat stat-green">
+          <div className="slbl">💰 Sales Revenue (taxable)</div>
+          <div className="sval-sm tx-cr">₹{fmt(fleetAnalytics.soldValue)}</div>
+          <div className="sval-sub">{(totalSold / 1000).toFixed(4)} MT sold</div>
+        </div>
+        <div className="stat stat-amber">
+          <div className="slbl">📈 Estimated Profit</div>
+          <div className="sval-sm" style={{ color: fleetAnalytics.estProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{fmt(Math.abs(fleetAnalytics.estProfit))}</div>
+          <div className="sval-sub">{fleetAnalytics.estProfit >= 0 ? 'sold − cost' : 'loss vs. cost'}</div>
+        </div>
       </div>
 
       <div className="filter-bar" style={{ marginBottom: 12 }}>
@@ -171,6 +200,7 @@ export default function MaterialsPage() {
           const tot = m.stock_tons || 0;
           const pct = tot > 0 ? Math.min(100, Math.round(rem / tot * 100)) : 0;
           const low = (m.min_stock || 0) > 0 && rem <= (m.min_stock || 0);
+          const ana = materialAnalytics(db, m.id);
           return (
             <div key={m.id} style={{
               border: `1px solid ${low ? '#f4bbb8' : 'var(--border)'}`,
@@ -220,6 +250,34 @@ export default function MaterialsPage() {
               </div>
               <div className="stock-bar-wrap" style={{ height: 10 }}>
                 <div className={`stock-bar ${pct < 20 ? 'low' : pct < 50 ? 'mid' : ''}`} style={{ width: `${pct}%`, height: 10 }} />
+              </div>
+
+              {/* Sales analytics row — derived from purchases + invoices, not stored. */}
+              <div className="g4" style={{ gap: 10, marginTop: 12 }}>
+                <div style={{ background: '#F4F8FB', borderRadius: 'var(--r)', padding: 10, border: '1px solid #d6e3ee' }}>
+                  <div style={{ fontSize: 10, color: 'var(--blue)', fontWeight: 700, textTransform: 'uppercase' }}>Purchased</div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--blue)', marginTop: 2 }}>{fmt2(ana.purchasedQty)} CFT</div>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>₹{fmt(ana.purchasedValue)} {ana.avgPurchaseRate > 0 ? `· avg ₹${ana.avgPurchaseRate.toFixed(2)}/CFT` : ''}</div>
+                </div>
+                <div style={{ background: 'var(--green-light)', borderRadius: 'var(--r)', padding: 10, border: '1px solid #b8e0c4' }}>
+                  <div style={{ fontSize: 10, color: 'var(--green)', fontWeight: 700, textTransform: 'uppercase' }}>Sold (Revenue)</div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--green)', marginTop: 2 }}>{fmt2(ana.soldQty)} CFT</div>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>₹{fmt(ana.soldValue)} taxable</div>
+                </div>
+                <div style={{ background: '#FBF6E8', borderRadius: 'var(--r)', padding: 10, border: '1px solid #f0d99a' }}>
+                  <div style={{ fontSize: 10, color: 'var(--amber)', fontWeight: 700, textTransform: 'uppercase' }}>Stock Valuation</div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--amber)', marginTop: 2 }}>₹{fmt(ana.currentStockValue)}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>{fmt2(ana.remaining)} CFT × avg rate</div>
+                </div>
+                <div style={{
+                  background: ana.estProfit >= 0 ? '#E8F5EC' : 'var(--red-light)',
+                  borderRadius: 'var(--r)', padding: 10,
+                  border: `1px solid ${ana.estProfit >= 0 ? '#a6d6b3' : '#f4bbb8'}`,
+                }}>
+                  <div style={{ fontSize: 10, color: ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700, textTransform: 'uppercase' }}>Estimated Profit</div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>₹{fmt(Math.abs(ana.estProfit))} {ana.estProfit < 0 ? 'loss' : ''}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>sold − (qty × avg cost)</div>
+                </div>
               </div>
             </div>
           );

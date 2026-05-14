@@ -2,15 +2,18 @@
 
 import { useState } from 'react';
 import { useDB } from '@/store/DBContext';
+import DimensionInput, { toDecimalFeet } from '@/components/DimensionInput';
 import { fmt } from '@/lib/helpers';
 import { STATES } from '@/lib/types';
 
 export default function CTFCalcPage() {
   const { db } = useDB();
 
-  // Volume to CFT
-  const [vL, setVL] = useState(''); const [vW, setVW] = useState(''); const [vH, setVH] = useState('');
-  const [vUnit, setVUnit] = useState<'ft' | 'm' | 'inch' | 'cm' | 'yard'>('ft');
+  // Volume to CFT — feet + inches per dimension. Inches are clamped 0-11 inside
+  // DimensionInput; the conversion to decimal feet is shared with the Slip page.
+  const [vLFt, setVLFt] = useState(''); const [vLIn, setVLIn] = useState('');
+  const [vWFt, setVWFt] = useState(''); const [vWIn, setVWIn] = useState('');
+  const [vHFt, setVHFt] = useState(''); const [vHIn, setVHIn] = useState('');
 
   // Rate calc
   const [crQty, setCrQty] = useState('');
@@ -29,15 +32,14 @@ export default function CTFCalcPage() {
   const [convCustom, setConvCustom] = useState('');
 
   const calcVol = (() => {
-    const l = parseFloat(vL) || 0, w = parseFloat(vW) || 0, h = parseFloat(vH) || 0;
-    if (l <= 0 || w <= 0 || h <= 0) return null;
-    let lf = l, wf = w, hf = h;
-    if (vUnit === 'm') { lf = l * 3.28084; wf = w * 3.28084; hf = h * 3.28084; }
-    else if (vUnit === 'inch') { lf = l / 12; wf = w / 12; hf = h / 12; }
-    else if (vUnit === 'cm') { lf = l / 30.48; wf = w / 30.48; hf = h / 30.48; }
-    else if (vUnit === 'yard') { lf = l * 3; wf = w * 3; hf = h * 3; }
+    // Convert ft+in pairs to decimal feet using the shared helper, then multiply.
+    // This is the spec: totalLength = feet + (inches / 12); CFT = L × W × H.
+    const lf = toDecimalFeet(vLFt, vLIn);
+    const wf = toDecimalFeet(vWFt, vWIn);
+    const hf = toDecimalFeet(vHFt, vHIn);
+    if (lf <= 0 || wf <= 0 || hf <= 0) return null;
     const cft = lf * wf * hf;
-    return { cft, cbm: cft / 35.3147, cyd: cft / 27 };
+    return { cft, cbm: cft / 35.3147, cyd: cft / 27, lf, wf, hf };
   })();
 
   const calcRate = (() => {
@@ -97,32 +99,18 @@ export default function CTFCalcPage() {
         <div className="card">
           <div className="section-hdr">Volume → Cubic Feet (CFT)</div>
           <div className="g3" style={{ gap: 10, marginBottom: 12 }}>
-            <div className="fg-row" style={{ marginBottom: 0 }}>
-              <label className="flbl">Length</label>
-              <input type="number" min="0" step="0.001" value={vL} onChange={e => setVL(e.target.value)} placeholder="0.000" />
-            </div>
-            <div className="fg-row" style={{ marginBottom: 0 }}>
-              <label className="flbl">Width</label>
-              <input type="number" min="0" step="0.001" value={vW} onChange={e => setVW(e.target.value)} placeholder="0.000" />
-            </div>
-            <div className="fg-row" style={{ marginBottom: 0 }}>
-              <label className="flbl">Height / Depth</label>
-              <input type="number" min="0" step="0.001" value={vH} onChange={e => setVH(e.target.value)} placeholder="0.000" />
-            </div>
+            <DimensionInput label="Length" feet={vLFt} inches={vLIn} onFeetChange={setVLFt} onInchesChange={setVLIn} />
+            <DimensionInput label="Width" feet={vWFt} inches={vWIn} onFeetChange={setVWFt} onInchesChange={setVWIn} />
+            <DimensionInput label="Height / Depth" feet={vHFt} inches={vHIn} onFeetChange={setVHFt} onInchesChange={setVHIn} />
           </div>
-          <div className="fg-row" style={{ marginBottom: 12 }}>
-            <label className="flbl">Input Unit</label>
-            <select value={vUnit} onChange={e => setVUnit(e.target.value as any)}>
-              <option value="ft">Feet (ft)</option>
-              <option value="m">Metres (m)</option>
-              <option value="inch">Inches (in)</option>
-              <option value="cm">Centimetres (cm)</option>
-              <option value="yard">Yards (yd)</option>
-            </select>
-          </div>
+          {calcVol && (
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
+              Decimal feet: <strong>{calcVol.lf.toFixed(4)}</strong> × <strong>{calcVol.wf.toFixed(4)}</strong> × <strong>{calcVol.hf.toFixed(4)}</strong>
+            </div>
+          )}
           <div className="calc-box" style={{ minHeight: 60 }}>
             <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>Result</div>
-            <div className="cr"><span>Volume in CFT</span><span style={{ fontSize: 18, fontWeight: 800, color: 'var(--accent)' }}>{calcVol ? calcVol.cft.toFixed(3) + ' CFT' : '—'}</span></div>
+            <div className="cr"><span>Volume in CFT</span><span style={{ fontSize: 18, fontWeight: 800, color: 'var(--accent)' }}>{calcVol ? calcVol.cft.toFixed(2) + ' CFT' : '—'}</span></div>
             <div className="cr"><span>Volume in CBM (m³)</span><span style={{ fontWeight: 700 }}>{calcVol ? calcVol.cbm.toFixed(4) + ' m³' : '—'}</span></div>
             <div className="cr"><span>Volume in Cubic Yards</span><span style={{ fontWeight: 700 }}>{calcVol ? calcVol.cyd.toFixed(4) + ' yd³' : '—'}</span></div>
           </div>
