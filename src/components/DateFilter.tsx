@@ -46,6 +46,7 @@ export default function DateFilter({ onChange, defaultPreset = 'month' }: Props)
   const presets: { key: string; label: string }[] = [
     { key: 'today', label: 'Today' },
     { key: 'week', label: '7D' },
+    { key: '30d', label: '30D' },
     { key: 'month', label: 'Month' },
     { key: 'quarter', label: 'Quarter' },
     { key: 'year', label: 'Year' },

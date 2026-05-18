@@ -316,6 +316,10 @@ export function getQuickRange(q: string): [string | null, string | null] {
     const s = new Date(now); s.setDate(d - 6);
     return [s.toISOString().split('T')[0], today()];
   }
+  if (q === '30d') {
+    const s = new Date(now); s.setDate(d - 29);
+    return [s.toISOString().split('T')[0], today()];
+  }
   if (q === 'month') return [`${y}-${String(m + 1).padStart(2, '0')}-01`, today()];
   if (q === 'lastmonth') {
     const lm = new Date(y, m, 0);

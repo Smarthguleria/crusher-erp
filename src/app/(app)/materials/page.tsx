@@ -159,12 +159,10 @@ export default function MaterialsPage() {
         <button className="btn btnp" onClick={() => openEdit()}>+ Add Material</button>
       </div>
 
+      {/* Top-card order is spec-driven: Purchase Spend → Sales Revenue → Estimated
+          Profit → Stock In Hand (always LAST). Reordering here preserves the visual
+          theme while leading with accounting-relevant figures. */}
       <div className="g4" style={{ marginBottom: 14 }}>
-        <div className="stat stat-accent">
-          <div className="slbl">📦 Stock On Hand</div>
-          <div className="sval-sm">{(totalStock / 1000).toFixed(4)} MT</div>
-          <div className="sval-sub">{fmt2(totalStock)} CFT · ₹{fmt(fleetAnalytics.currentStockValue || totalValue)}</div>
-        </div>
         <div className="stat stat-blue">
           <div className="slbl">📥 Purchase Spend (all time)</div>
           <div className="sval-sm" style={{ color: 'var(--blue)' }}>₹{fmt(fleetAnalytics.purchasedValue)}</div>
@@ -179,6 +177,11 @@ export default function MaterialsPage() {
           <div className="slbl">📈 Estimated Profit</div>
           <div className="sval-sm" style={{ color: fleetAnalytics.estProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{fmt(Math.abs(fleetAnalytics.estProfit))}</div>
           <div className="sval-sub">{fleetAnalytics.estProfit >= 0 ? 'sold − cost' : 'loss vs. cost'}</div>
+        </div>
+        <div className="stat stat-accent">
+          <div className="slbl">📦 Stock In Hand (live)</div>
+          <div className="sval-sm">{(totalStock / 1000).toFixed(4)} MT</div>
+          <div className="sval-sub">{fmt2(totalStock)} CFT · ₹{fmt(fleetAnalytics.currentStockValue || totalValue)}</div>
         </div>
       </div>
 

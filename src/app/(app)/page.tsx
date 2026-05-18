@@ -6,7 +6,7 @@ import { Bar } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
 import { useDB } from '@/store/DBContext';
 import DateFilter from '@/components/DateFilter';
-import { dateRangeFilter, expiryStatus, fmt, fmt2, payClass, payLabel, stockRemaining, today, shareWA } from '@/lib/helpers';
+import { dateRangeFilter, fmt, fmt2, payClass, payLabel, stockRemaining, today, shareWA } from '@/lib/helpers';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
 
@@ -40,33 +40,13 @@ export default function DashboardPage() {
 
   const recent = [...filtered].reverse().slice(0, 10);
 
-  // ─── Operations: fleet / inventory / expense aggregates (date-range filtered) ───
+  // ─── Period-scoped accounting aggregates. Stock-related cards (e.g. Available
+  // in the Live Stock Status panel) intentionally bypass the date filter — current
+  // stock must always reflect live inventory, not historical-window slices. ───
   const filteredPurchases = useMemo(() => dateRangeFilter(db.purchases, from, to), [db.purchases, from, to]);
   const filteredExpenses = useMemo(() => dateRangeFilter(db.expenses, from, to), [db.expenses, from, to]);
-  const filteredTrips = useMemo(() => dateRangeFilter(db.trips, from, to), [db.trips, from, to]);
-  const filteredFuel = useMemo(() => dateRangeFilter(db.fuel_logs, from, to), [db.fuel_logs, from, to]);
   const totalPurchaseSpend = filteredPurchases.reduce((a, p) => a + p.total_amount, 0);
   const totalExpenseSpend = filteredExpenses.reduce((a, e) => a + e.amount, 0);
-  const totalFreight = filteredTrips.reduce((a, t) => a + t.freight_amount, 0);
-  const totalFuelCost = filteredFuel.reduce((a, f) => a + f.total_amount, 0);
-  const fleetProfit = totalFreight - totalFuelCost;
-
-  const todayTrips = db.trips.filter(t => t.date.startsWith(ts)).length;
-  const lowStockMats = db.materials.filter(m => (m.min_stock || 0) > 0 && stockRemaining(db, m.id) <= (m.min_stock || 0));
-
-  // Document expiry alerts across the fleet (insurance / fitness / pollution / license).
-  // Anything not 'ok' or 'unknown' counts — critical and expired are urgent.
-  let docAlerts = 0;
-  db.vehicles.forEach(v => {
-    [v.insurance_expiry, v.fitness_expiry, v.pollution_expiry].forEach(d => {
-      const s = expiryStatus(d);
-      if (s === 'expired' || s === 'critical' || s === 'soon') docAlerts++;
-    });
-  });
-  db.drivers.forEach(d => {
-    const s = expiryStatus(d.license_expiry);
-    if (s === 'expired' || s === 'critical' || s === 'soon') docAlerts++;
-  });
 
   const chartLabels: string[] = [];
   const chartData: number[] = [];
@@ -99,10 +79,15 @@ export default function DashboardPage() {
       </div>
 
       <div style={{ marginBottom: 14 }}>
-        <DateFilter onChange={(f, t) => { setFrom(f); setTo(t); }} />
+        {/* Default to last-7-days for an accounting-focused at-a-glance window.
+            Note: only the period-scoped aggregates (revenue, paid/pending/debt,
+            purchases, expenses) honour this filter — Live Stock Status below uses
+            stockRemaining() which always reflects real-time inventory. */}
+        <DateFilter defaultPreset="week" onChange={(f, t) => { setFrom(f); setTo(t); }} />
       </div>
 
-      <div className="g4" style={{ marginBottom: 14 }}>
+      {/* Top row — Revenue · Outstanding · Qty Sold (3-col per dashboard spec). */}
+      <div className="g3" style={{ marginBottom: 14 }}>
         <div className="stat stat-accent">
           <div className="slbl">Revenue</div>
           <div className="sval" style={{ color: 'var(--accent)', fontSize: 20 }}>₹{fmt(totalRev)}</div>
@@ -117,11 +102,6 @@ export default function DashboardPage() {
           <div className="slbl">Qty Sold</div>
           <div className="sval" style={{ fontSize: 18 }}>{fmt2(totalSold)} CFT</div>
           <div className="sval-sub" style={{ color: 'var(--accent2)', fontWeight: 700 }}>{(totalSold / 1000).toFixed(4)} MT</div>
-        </div>
-        <div className="stat" style={{ borderLeft: '3px solid var(--purple)' }}>
-          <div className="slbl">Slips / Invoices</div>
-          <div className="sval" style={{ fontSize: 20 }}>{filtered.length}</div>
-          <div className="sval-sub">{db.invoices.length} invoiced · {db.parties.length} parties</div>
         </div>
       </div>
 
@@ -143,7 +123,8 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="g4" style={{ marginBottom: 14 }}>
+      {/* Third row — Purchases · Expenses (2-col, accounting-focused). */}
+      <div className="g2" style={{ marginBottom: 14 }}>
         <div className="stat stat-blue">
           <div className="slbl">📥 Purchases (period)</div>
           <div className="sval-sm" style={{ color: 'var(--blue)' }}>₹{fmt(totalPurchaseSpend)}</div>
@@ -153,16 +134,6 @@ export default function DashboardPage() {
           <div className="slbl">💸 Expenses (period)</div>
           <div className="sval-sm tx-dr">₹{fmt(totalExpenseSpend)}</div>
           <div className="sval-sub">{filteredExpenses.length} entries</div>
-        </div>
-        <div className="stat stat-green">
-          <div className="slbl">🚛 Fleet Profit (Freight − Fuel)</div>
-          <div className="sval-sm" style={{ color: fleetProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{fmt(Math.abs(fleetProfit))}</div>
-          <div className="sval-sub">{filteredTrips.length} trips · {todayTrips} today · ₹{fmt(totalFuelCost)} fuel</div>
-        </div>
-        <div className="stat stat-amber">
-          <div className="slbl">⚠ Alerts</div>
-          <div className="sval-sm tx-pd">{docAlerts + lowStockMats.length}</div>
-          <div className="sval-sub">{docAlerts} doc expiry · {lowStockMats.length} low stock</div>
         </div>
       </div>
 
