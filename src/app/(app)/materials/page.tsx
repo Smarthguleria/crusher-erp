@@ -6,7 +6,11 @@ import { useToast } from '@/store/ToastContext';
 import Modal from '@/components/Modal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import NumberInput from '@/components/NumberInput';
-import { fmt, fmt2, isPositiveNumber, materialAnalytics, materialHasLinkedRecords, stockRemaining, stockSold } from '@/lib/helpers';
+import DateFilter from '@/components/DateFilter';
+import {
+  fmt, fmt2, fmtDateTime12, isPositiveNumber, materialAnalytics, materialHasLinkedRecords,
+  stockHealth, stockRemaining, stockSold,
+} from '@/lib/helpers';
 import type { Material } from '@/lib/types';
 
 interface MatForm {
@@ -27,6 +31,11 @@ const EMPTY_FORM: MatForm = {
   stock_tons: '', stock_value: '', min_stock: '',
 };
 
+const HEALTH_CLASS = { green: 'health-green', amber: 'health-amber', red: 'health-red' } as const;
+const HBAR_CLASS = { green: 'hbar-green', amber: 'hbar-amber', red: 'hbar-red' } as const;
+const HEALTH_DOT = { green: '🟢', amber: '🟡', red: '🔴' } as const;
+const PAGE_SIZE = 8;
+
 export default function MaterialsPage() {
   const { db, setDb } = useDB();
   const toast = useToast();
@@ -34,22 +43,34 @@ export default function MaterialsPage() {
   const [stockForm, setStockForm] = useState<{ matId: number; qty: string; rate: string; sv: string; note: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<{ id: number; name: string } | null>(null);
   const [search, setSearch] = useState('');
+  const [drawerId, setDrawerId] = useState<number | null>(null);
+
+  // Date filter — scopes ANALYTICS and STOCK HISTORY only. Live stock figures
+  // (current/available/value/health) intentionally bypass it (Section 7).
+  const [from, setFrom] = useState<string | null>(null);
+  const [to, setTo] = useState<string | null>(null);
+
+  // Stock-movement history table controls.
+  const [histSearch, setHistSearch] = useState('');
+  const [histMat, setHistMat] = useState<'all' | number>('all');
+  const [histPage, setHistPage] = useState(1);
 
   const totalStock = db.materials.reduce((a, m) => a + (m.stock_tons || 0), 0);
   const totalValue = db.materials.reduce((a, m) => a + (m.stock_value || 0), 0);
   const totalSold = db.slips.reduce((a, s) => a + s.quantity, 0);
 
-  // Roll up sales analytics across every material so the header strip shows business-
-  // level KPIs (revenue, profit) alongside stock.
-  const fleetAnalytics = db.materials.reduce((acc, m) => {
-    const a = materialAnalytics(db, m.id);
+  // Fleet-level rollup honours the date filter for the spend/revenue/profit KPIs,
+  // but stock-in-hand stays live.
+  const fleet = db.materials.reduce((acc, m) => {
+    const a = materialAnalytics(db, m.id, from, to);
     return {
       purchasedValue: acc.purchasedValue + a.purchasedValue,
       soldValue: acc.soldValue + a.soldValue,
       currentStockValue: acc.currentStockValue + a.currentStockValue,
       estProfit: acc.estProfit + a.estProfit,
+      soldQty: acc.soldQty + a.soldQty,
     };
-  }, { purchasedValue: 0, soldValue: 0, currentStockValue: 0, estProfit: 0 });
+  }, { purchasedValue: 0, soldValue: 0, currentStockValue: 0, estProfit: 0, soldQty: 0 });
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -61,6 +82,64 @@ export default function MaterialsPage() {
     );
   }, [db.materials, search]);
 
+  // Smart insights (Section 10) — derived, defensive against empty data.
+  const insights = useMemo(() => {
+    const out: { tone: '' | 'warn' | 'danger' | 'info'; ico: string; bg: string; color: string; t: string; s: string }[] = [];
+    // Top-selling material (by sold qty in period).
+    const ranked = db.materials
+      .map(m => ({ m, a: materialAnalytics(db, m.id, from, to) }))
+      .filter(x => x.a.soldQty > 0)
+      .sort((a, b) => b.a.soldQty - a.a.soldValue);
+    if (ranked[0]) {
+      const top = [...ranked].sort((a, b) => b.a.soldValue - a.a.soldValue)[0];
+      out.push({ tone: 'info', ico: '🏆', bg: 'var(--blue-light)', color: 'var(--blue)', t: `${top.m.material_name} is your top-selling material`, s: `₹${fmt(top.a.soldValue)} revenue in this period` });
+      const prof = [...ranked].sort((a, b) => b.a.estProfit - a.a.estProfit)[0];
+      out.push({ tone: '', ico: '📈', bg: 'var(--green-light)', color: 'var(--green)', t: `${prof.m.material_name} is the most profitable`, s: `₹${fmt(Math.abs(prof.a.estProfit))} estimated profit` });
+    }
+    // Run-out risk — pick the material closest to depletion that still sells.
+    const risk = db.materials
+      .map(m => {
+        const rem = stockRemaining(db, m.id);
+        const a = materialAnalytics(db, m.id, from, to);
+        // crude daily burn from period sold qty over the window length (fallback 30d)
+        const days = from && to ? Math.max(1, (new Date(to).getTime() - new Date(from).getTime()) / 86400000 + 1) : 30;
+        const perDay = a.soldQty / days;
+        return { m, rem, daysLeft: perDay > 0 ? rem / perDay : Infinity };
+      })
+      .filter(x => isFinite(x.daysLeft) && x.daysLeft < 14)
+      .sort((a, b) => a.daysLeft - b.daysLeft)[0];
+    if (risk) out.push({ tone: 'warn', ico: '⏳', bg: 'var(--amber-light)', color: 'var(--amber)', t: `${risk.m.material_name} stock may run out in ${Math.ceil(risk.daysLeft)} days`, s: `${fmt(risk.rem)} CFT remaining at current sales pace` });
+    // Outstanding collection.
+    const outstanding = db.slips.filter(s => s.payment_status !== 'paid').reduce((a, s) => a + s.final_amount, 0);
+    if (outstanding > 0) out.push({ tone: 'danger', ico: '💰', bg: 'var(--red-light)', color: 'var(--red)', t: `₹${fmt(outstanding)} outstanding to collect`, s: 'Pending + debt across all parties' });
+    return out.slice(0, 4);
+  }, [db, from, to]);
+
+  // Flattened, filtered, paginated movement history.
+  const allMovements = useMemo(() => {
+    let rows = [...db.stock_movements].sort((a, b) => (a.date < b.date ? 1 : -1));
+    if (histMat !== 'all') rows = rows.filter(r => r.material_id === histMat);
+    rows = rows.filter(r => {
+      const d = r.date.split('T')[0];
+      if (from && d < from) return false;
+      if (to && d > to) return false;
+      return true;
+    });
+    const q = histSearch.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(r => {
+        const name = db.materials.find(m => m.id === r.material_id)?.material_name.toLowerCase() || '';
+        return name.includes(q) || (r.updated_by || '').toLowerCase().includes(q) || (r.note || '').toLowerCase().includes(q);
+      });
+    }
+    return rows;
+  }, [db.stock_movements, db.materials, histMat, histSearch, from, to]);
+
+  const histPages = Math.max(1, Math.ceil(allMovements.length / PAGE_SIZE));
+  const pageRows = allMovements.slice((histPage - 1) * PAGE_SIZE, histPage * PAGE_SIZE);
+  const matName = (id: number) => db.materials.find(m => m.id === id)?.material_name || '—';
+
+  // ─────────────── CRUD (logic unchanged from the original) ───────────────
   const openEdit = (m?: Material) => {
     if (m) {
       setEditForm({
@@ -81,8 +160,9 @@ export default function MaterialsPage() {
   const saveMat = () => {
     if (!editForm) return;
     if (!editForm.material_name.trim()) { toast('Material name is required', 'error'); return; }
+    const isNew = !editForm.id;
     setDb(prev => {
-      const next = { ...prev, materials: [...prev.materials] };
+      const next = { ...prev, materials: [...prev.materials], stock_movements: [...prev.stock_movements], counters: { ...prev.counters } };
       const data: Material = {
         id: editForm.id || (Math.max(0, ...next.materials.map(m => m.id)) + 1),
         material_name: editForm.material_name.trim(),
@@ -100,6 +180,23 @@ export default function MaterialsPage() {
         if (i >= 0) next.materials[i] = data;
       } else {
         next.materials.push(data);
+        // Seed an "opening" audit row so the history starts at the true opening balance.
+        if (data.stock_tons > 0) {
+          next.counters.movement = next.counters.movement || 1;
+          next.stock_movements.push({
+            movement_id: next.counters.movement++,
+            material_id: data.id,
+            date: new Date().toISOString(),
+            type: 'opening',
+            previous_stock: 0,
+            added_qty: data.stock_tons,
+            current_stock: data.stock_tons,
+            rate: data.purchase_price || undefined,
+            value: data.stock_value || undefined,
+            updated_by: 'Admin',
+            note: 'Opening stock',
+          });
+        }
       }
       return next;
     });
@@ -123,8 +220,13 @@ export default function MaterialsPage() {
 
   const performDelete = () => {
     if (!confirmDel) return;
-    setDb(prev => ({ ...prev, materials: prev.materials.filter(m => m.id !== confirmDel.id) }));
+    setDb(prev => ({
+      ...prev,
+      materials: prev.materials.filter(m => m.id !== confirmDel.id),
+      stock_movements: prev.stock_movements.filter(mv => mv.material_id !== confirmDel.id),
+    }));
     toast('Material deleted', 'warning');
+    if (drawerId === confirmDel.id) setDrawerId(null);
     setConfirmDel(null);
   };
 
@@ -135,13 +237,28 @@ export default function MaterialsPage() {
     const rate = parseFloat(stockForm.rate) || 0;
     const sv = parseFloat(stockForm.sv) || (qty * rate);
     setDb(prev => {
-      const next = { ...prev, materials: [...prev.materials] };
+      const next = { ...prev, materials: [...prev.materials], stock_movements: [...prev.stock_movements], counters: { ...prev.counters } };
       const m = next.materials.find(x => x.id === stockForm.matId);
       if (m) {
-        m.stock_tons = (m.stock_tons || 0) + qty;
+        const previous = m.stock_tons || 0;                 // snapshot BEFORE — unchanged logic
+        m.stock_tons = previous + qty;
         m.stock_value = (m.stock_value || 0) + sv;
-        // Update average purchase price if a rate was given.
-        if (rate > 0) m.purchase_price = rate;
+        if (rate > 0) m.purchase_price = rate;              // average / last purchase price
+        // Append the audit row (additive — does not affect any calculation).
+        next.counters.movement = next.counters.movement || 1;
+        next.stock_movements.push({
+          movement_id: next.counters.movement++,
+          material_id: m.id,
+          date: new Date().toISOString(),
+          type: 'topup',
+          previous_stock: previous,
+          added_qty: qty,
+          current_stock: m.stock_tons,
+          rate: rate || undefined,
+          value: sv || undefined,
+          updated_by: 'Admin',
+          note: stockForm.note || undefined,
+        });
       }
       return next;
     });
@@ -149,144 +266,314 @@ export default function MaterialsPage() {
     setStockForm(null);
   };
 
+  // ─────────────── Exports (client-side, no deps) ───────────────
+  const exportExcel = () => {
+    const head = ['Date', 'Material', 'Type', 'Previous Stock (CFT)', 'Added (CFT)', 'Current Stock (CFT)', 'Purchase Rate', 'Value', 'Updated By', 'Note'];
+    const lines = allMovements.map(r => [
+      fmtDateTime12(r.date), matName(r.material_id), r.type, r.previous_stock, r.added_qty, r.current_stock,
+      r.rate ?? '', r.value ?? '', r.updated_by, (r.note || '').replace(/"/g, '""'),
+    ]);
+    const csv = [head, ...lines].map(row => row.map(c => `"${c}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `stock-history.csv`; a.click();
+    URL.revokeObjectURL(url);
+    toast('Exported to Excel (CSV)', 'success');
+  };
+
+  const exportPDF = () => {
+    const rows = allMovements.map(r => `<tr>
+      <td>${fmtDateTime12(r.date)}</td><td>${matName(r.material_id)}</td><td>${r.type}</td>
+      <td style="text-align:right">${fmt2(r.previous_stock)}</td>
+      <td style="text-align:right;color:#1A6B35">+${fmt2(r.added_qty)}</td>
+      <td style="text-align:right;font-weight:700">${fmt2(r.current_stock)}</td>
+      <td style="text-align:right">${r.rate ? '₹' + r.rate : '—'}</td>
+      <td>${r.updated_by}</td></tr>`).join('');
+    const w = window.open('', '_blank');
+    if (!w) { toast('Allow pop-ups to export PDF', 'error'); return; }
+    w.document.write(`<html><head><title>Stock Movement History</title>
+      <style>body{font-family:Arial,sans-serif;padding:24px;color:#111}h1{font-size:18px}
+      table{width:100%;border-collapse:collapse;font-size:11px;margin-top:12px}
+      th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}th{background:#16422C;color:#fff}</style></head>
+      <body><h1>Stock Movement History — ${db.bizInfo.name || 'Crusher ERP'}</h1>
+      <table><thead><tr><th>Date</th><th>Material</th><th>Type</th><th>Previous</th><th>Added</th><th>Current</th><th>Rate</th><th>By</th></tr></thead>
+      <tbody>${rows}</tbody></table></body></html>`);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 250);
+  };
+
+  const drawerMat = drawerId != null ? db.materials.find(m => m.id === drawerId) : null;
+
   return (
     <>
       <div className="ph">
         <div>
           <div className="pt">Material Master</div>
-          <div className="ps">Rates, HSN codes &amp; live stock management</div>
+          <div className="ps">Inventory, rates &amp; live stock — understand every material at a glance</div>
         </div>
         <button className="btn btnp" onClick={() => openEdit()}>+ Add Material</button>
       </div>
 
-      {/* Top-card order is spec-driven: Purchase Spend → Sales Revenue → Estimated
-          Profit → Stock In Hand (always LAST). Reordering here preserves the visual
-          theme while leading with accounting-relevant figures. */}
-      <div className="g4" style={{ marginBottom: 14 }}>
-        <div className="stat stat-blue">
-          <div className="slbl">📥 Purchase Spend (all time)</div>
-          <div className="sval-sm" style={{ color: 'var(--blue)' }}>₹{fmt(fleetAnalytics.purchasedValue)}</div>
-          <div className="sval-sub">across {db.purchases.length} purchase{db.purchases.length !== 1 ? 's' : ''}</div>
-        </div>
-        <div className="stat stat-green">
-          <div className="slbl">💰 Sales Revenue (taxable)</div>
-          <div className="sval-sm tx-cr">₹{fmt(fleetAnalytics.soldValue)}</div>
-          <div className="sval-sub">{(totalSold / 1000).toFixed(4)} MT sold</div>
-        </div>
-        <div className="stat stat-amber">
-          <div className="slbl">📈 Estimated Profit</div>
-          <div className="sval-sm" style={{ color: fleetAnalytics.estProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{fmt(Math.abs(fleetAnalytics.estProfit))}</div>
-          <div className="sval-sub">{fleetAnalytics.estProfit >= 0 ? 'sold − cost' : 'loss vs. cost'}</div>
-        </div>
-        <div className="stat stat-accent">
-          <div className="slbl">📦 Stock In Hand (live)</div>
-          <div className="sval-sm">{(totalStock / 1000).toFixed(4)} MT</div>
-          <div className="sval-sub">{fmt2(totalStock)} CFT · ₹{fmt(fleetAnalytics.currentStockValue || totalValue)}</div>
-        </div>
+      <div style={{ marginBottom: 14 }}>
+        <DateFilter defaultPreset="month" onChange={(f, t) => { setFrom(f); setTo(t); setHistPage(1); }} />
+        <div className="field-hint" style={{ marginTop: 4 }}>Date range scopes analytics &amp; stock history. Current stock, value &amp; health always show live values.</div>
       </div>
 
+      {/* ── Fleet KPI strip (Section 4) — modern tiles ── */}
+      <div className="g4" style={{ marginBottom: 14 }}>
+        <KpiTile ico="📥" bg="var(--blue-light)" color="var(--blue)" label="Purchase Spend"
+          value={`₹${fmt(fleet.purchasedValue)}`} sub={`${db.purchases.length} purchases · period`} />
+        <KpiTile ico="💰" bg="var(--green-light)" color="var(--green)" label="Sales Revenue"
+          value={`₹${fmt(fleet.soldValue)}`} sub={`${(fleet.soldQty / 1000).toFixed(3)} MT sold (taxable)`} />
+        <KpiTile ico="📈" bg="var(--amber-light)" color="var(--amber)" label="Estimated Profit"
+          value={`₹${fmt(Math.abs(fleet.estProfit))}`} sub={fleet.estProfit >= 0 ? 'sold − cost' : 'loss vs. cost'} />
+        <KpiTile ico="📦" bg="var(--accent-light)" color="var(--accent3)" label="Stock In Hand (live)"
+          value={`${(totalStock / 1000).toFixed(3)} MT`} sub={`${fmt2(totalStock)} CFT · ₹${fmt(fleet.currentStockValue || totalValue)}`} />
+      </div>
+
+      {/* ── Smart insights (Section 10) ── */}
+      {insights.length > 0 && (
+        <div className="g4" style={{ marginBottom: 16 }}>
+          {insights.map((n, i) => (
+            <div key={i} className={`insight ${n.tone}`}>
+              <div className="insight-ico" style={{ background: n.bg, color: n.color }}>{n.ico}</div>
+              <div><div className="insight-t">{n.t}</div><div className="insight-s">{n.s}</div></div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Search + material cards (Section 2) ── */}
       <div className="filter-bar" style={{ marginBottom: 12 }}>
         <div className="search-wrap" style={{ flex: 1, minWidth: 220 }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-          <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, HSN, unit…" />
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>
+          <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search materials by name, HSN, unit…" />
         </div>
         {search && <button className="btn btn-sm" onClick={() => setSearch('')}>Clear</button>}
       </div>
 
-      <div className="card">
-        <div className="section-hdr">Material Stock Details</div>
-        {filtered.length === 0 ? (
-          <div className="empty"><div className="empty-icon">📦</div>No materials match your search</div>
-        ) : filtered.map(m => {
-          const sold = stockSold(db, m.id);
-          const rem = stockRemaining(db, m.id);
-          const tot = m.stock_tons || 0;
-          const pct = tot > 0 ? Math.min(100, Math.round(rem / tot * 100)) : 0;
-          const low = (m.min_stock || 0) > 0 && rem <= (m.min_stock || 0);
-          const ana = materialAnalytics(db, m.id);
-          return (
-            <div key={m.id} style={{
-              border: `1px solid ${low ? '#f4bbb8' : 'var(--border)'}`,
-              borderRadius: 'var(--r)', padding: 16, marginBottom: 12,
-              background: low ? '#FFFAFA' : 'var(--surface)',
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 800 }}>
-                    {m.material_name} {low && <span style={{ color: 'var(--red)', fontSize: 11, fontWeight: 700 }}>⚠ Low Stock</span>}
+      {filtered.length === 0 ? (
+        <div className="card"><div className="empty"><div className="empty-icon">📦</div>No materials match your search</div></div>
+      ) : (
+        <div className="cards-grid" style={{ marginBottom: 18 }}>
+          {filtered.map(m => {
+            const rem = stockRemaining(db, m.id);
+            const tot = m.stock_tons || 0;
+            const h = stockHealth(rem, tot, m.min_stock || 0);
+            const ana = materialAnalytics(db, m.id, from, to);
+            return (
+              <div key={m.id} className="mcard" onClick={() => setDrawerId(m.id)}>
+                <div className="mcard-hd">
+                  <div>
+                    <div className="mcard-name">{m.material_name}</div>
+                    <div className="mcard-hsn">HSN {m.hsn_code} · GST {m.gst_percent}%</div>
                   </div>
-                  <div className="mono" style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
-                    HSN: {m.hsn_code} · GST: {m.gst_percent}% · Sell: ₹{m.rate}/CFT{m.purchase_price ? ` · Buy: ₹${m.purchase_price}/CFT` : ''}
+                  <span className={`health ${HEALTH_CLASS[h.level]}`}>{HEALTH_DOT[h.level]} {h.label}</span>
+                </div>
+                <div className="mcard-metrics">
+                  <div>
+                    <div className="mcard-m-lbl">Current Stock</div>
+                    <div className="mcard-m-val">{(tot / 1000).toFixed(3)} <span style={{ fontSize: 11, color: 'var(--text3)' }}>MT</span></div>
+                  </div>
+                  <div>
+                    <div className="mcard-m-lbl">Available</div>
+                    <div className="mcard-m-val" style={{ color: 'var(--green)' }}>{fmt2(rem)} <span style={{ fontSize: 11, color: 'var(--text3)' }}>CFT</span></div>
+                  </div>
+                  <div>
+                    <div className="mcard-m-lbl">Stock Value</div>
+                    <div className="mcard-m-val" style={{ color: 'var(--blue)' }}>₹{fmt(m.stock_value || 0)}</div>
+                  </div>
+                  <div>
+                    <div className="mcard-m-lbl">Est. Profit</div>
+                    <div className="mcard-m-val" style={{ color: ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>₹{fmt(Math.abs(ana.estProfit))}</div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <button className="btn btn-sm btng" onClick={() => setStockForm({ matId: m.id, qty: '', rate: String(m.purchase_price || m.rate || ''), sv: '', note: '' })}>+ Add Stock</button>
-                  <button className="btn btn-sm" onClick={() => openEdit(m)}>Edit</button>
-                  <button className="btn btn-sm" onClick={() => requestDelete(m)} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>Delete</button>
+                <div className={`hbar ${HBAR_CLASS[h.level]}`}><span style={{ width: `${h.pct}%` }} /></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 600 }}>{h.pct}% available</span>
+                  <button className="btn btn-sm" onClick={e => { e.stopPropagation(); setDrawerId(m.id); }}>View Details →</button>
                 </div>
               </div>
-              <div className="g4" style={{ gap: 10, marginBottom: 12 }}>
-                <div style={{ background: 'var(--surface2)', borderRadius: 'var(--r)', padding: 10, textAlign: 'center', border: '1px solid var(--border)' }}>
-                  <div style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 700, textTransform: 'uppercase' }}>Stock In</div>
-                  <div style={{ fontSize: 15, fontWeight: 800, marginTop: 3 }}>{(tot / 1000).toFixed(4)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>MT</div>
-                </div>
-                <div style={{ background: 'var(--red-light)', borderRadius: 'var(--r)', padding: 10, textAlign: 'center', border: '1px solid #f4bbb8' }}>
-                  <div style={{ fontSize: 10, color: 'var(--red)', fontWeight: 700, textTransform: 'uppercase' }}>Sold</div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--red)', marginTop: 3 }}>{(sold / 1000).toFixed(4)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>MT</div>
-                </div>
-                <div style={{ background: 'var(--green-light)', borderRadius: 'var(--r)', padding: 10, textAlign: 'center', border: '1px solid #b8e0c4' }}>
-                  <div style={{ fontSize: 10, color: 'var(--green)', fontWeight: 700, textTransform: 'uppercase' }}>Available</div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--green)', marginTop: 3 }}>{(rem / 1000).toFixed(4)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>MT</div>
-                </div>
-                <div style={{ background: 'var(--blue-light)', borderRadius: 'var(--r)', padding: 10, textAlign: 'center', border: '1px solid #b8d4f0' }}>
-                  <div style={{ fontSize: 10, color: 'var(--blue)', fontWeight: 700, textTransform: 'uppercase' }}>Stock Value</div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--blue)', marginTop: 3 }}>₹{fmt(m.stock_value || 0)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>Total</div>
-                </div>
-              </div>
-              <div style={{ marginBottom: 5, display: 'flex', justifyContent: 'space-between', fontSize: 11.5 }}>
-                <span style={{ fontWeight: 600 }}>Stock Level — {pct}% available</span>
-                <span style={{ color: 'var(--text3)' }}>{(m.min_stock || 0) > 0 ? `Min alert: ${m.min_stock} CFT` : ''}</span>
-              </div>
-              <div className="stock-bar-wrap" style={{ height: 10 }}>
-                <div className={`stock-bar ${pct < 20 ? 'low' : pct < 50 ? 'mid' : ''}`} style={{ width: `${pct}%`, height: 10 }} />
-              </div>
+            );
+          })}
+        </div>
+      )}
 
-              {/* Sales analytics row — derived from purchases + invoices, not stored. */}
-              <div className="g4" style={{ gap: 10, marginTop: 12 }}>
-                <div style={{ background: '#F4F8FB', borderRadius: 'var(--r)', padding: 10, border: '1px solid #d6e3ee' }}>
-                  <div style={{ fontSize: 10, color: 'var(--blue)', fontWeight: 700, textTransform: 'uppercase' }}>Purchased</div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--blue)', marginTop: 2 }}>{fmt2(ana.purchasedQty)} CFT</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>₹{fmt(ana.purchasedValue)} {ana.avgPurchaseRate > 0 ? `· avg ₹${ana.avgPurchaseRate.toFixed(2)}/CFT` : ''}</div>
-                </div>
-                <div style={{ background: 'var(--green-light)', borderRadius: 'var(--r)', padding: 10, border: '1px solid #b8e0c4' }}>
-                  <div style={{ fontSize: 10, color: 'var(--green)', fontWeight: 700, textTransform: 'uppercase' }}>Sold (Revenue)</div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--green)', marginTop: 2 }}>{fmt2(ana.soldQty)} CFT</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>₹{fmt(ana.soldValue)} taxable</div>
-                </div>
-                <div style={{ background: '#FBF6E8', borderRadius: 'var(--r)', padding: 10, border: '1px solid #f0d99a' }}>
-                  <div style={{ fontSize: 10, color: 'var(--amber)', fontWeight: 700, textTransform: 'uppercase' }}>Stock Valuation</div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--amber)', marginTop: 2 }}>₹{fmt(ana.currentStockValue)}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>{fmt2(ana.remaining)} CFT × avg rate</div>
-                </div>
-                <div style={{
-                  background: ana.estProfit >= 0 ? '#E8F5EC' : 'var(--red-light)',
-                  borderRadius: 'var(--r)', padding: 10,
-                  border: `1px solid ${ana.estProfit >= 0 ? '#a6d6b3' : '#f4bbb8'}`,
-                }}>
-                  <div style={{ fontSize: 10, color: ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700, textTransform: 'uppercase' }}>Estimated Profit</div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)', marginTop: 2 }}>₹{fmt(Math.abs(ana.estProfit))} {ana.estProfit < 0 ? 'loss' : ''}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>sold − (qty × avg cost)</div>
-                </div>
+      {/* ── Stock movement history (Section 6) ── */}
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+          <div className="section-hdr" style={{ margin: 0, border: 0, padding: 0 }}>📜 Stock Movement History</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button className="btn btn-sm" onClick={exportExcel} disabled={allMovements.length === 0}>⬇ Excel</button>
+            <button className="btn btn-sm" onClick={exportPDF} disabled={allMovements.length === 0}>⬇ PDF</button>
+          </div>
+        </div>
+        <div className="filter-bar">
+          <div className="search-wrap" style={{ flex: 1, minWidth: 200 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>
+            <input type="text" value={histSearch} onChange={e => { setHistSearch(e.target.value); setHistPage(1); }} placeholder="Search by material, user, note…" />
+          </div>
+          <select value={histMat} onChange={e => { setHistMat(e.target.value === 'all' ? 'all' : Number(e.target.value)); setHistPage(1); }}>
+            <option value="all">All materials</option>
+            {db.materials.map(m => <option key={m.id} value={m.id}>{m.material_name}</option>)}
+          </select>
+        </div>
+        {allMovements.length === 0 ? (
+          <div className="empty"><div className="empty-icon">📜</div>No stock movements recorded yet. Use <b>+ Add Stock</b> on any material to start the audit trail.</div>
+        ) : (
+          <>
+            <div className="tbl tbl-sticky">
+              <table>
+                <thead>
+                  <tr><th>Date</th><th>Material</th><th>Type</th><th>Previous</th><th>Added</th><th>Current</th><th>Rate</th><th>Updated By</th></tr>
+                </thead>
+                <tbody>
+                  {pageRows.map(r => (
+                    <tr key={r.movement_id}>
+                      <td style={{ fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDateTime12(r.date)}</td>
+                      <td style={{ fontWeight: 700 }}>{matName(r.material_id)}</td>
+                      <td><span className={`badge ${r.type === 'opening' ? 'bb' : r.type === 'adjustment' ? 'ba' : 'bg'}`}>{r.type}</span></td>
+                      <td className="mono" style={{ fontSize: 11.5 }}>{fmt2(r.previous_stock)}</td>
+                      <td className="mono tx-cr" style={{ fontSize: 11.5 }}>{r.added_qty >= 0 ? '+' : ''}{fmt2(r.added_qty)}</td>
+                      <td className="mono" style={{ fontSize: 11.5, fontWeight: 800 }}>{fmt2(r.current_stock)}</td>
+                      <td className="mono" style={{ fontSize: 11.5 }}>{r.rate ? `₹${r.rate}` : '—'}</td>
+                      <td><span className="tag-chip">{r.updated_by}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap', gap: 8 }}>
+              <span style={{ fontSize: 11.5, color: 'var(--text3)' }}>{allMovements.length} movement{allMovements.length !== 1 ? 's' : ''} · page {histPage} of {histPages}</span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn btn-sm" disabled={histPage <= 1} onClick={() => setHistPage(p => Math.max(1, p - 1))}>← Prev</button>
+                <button className="btn btn-sm" disabled={histPage >= histPages} onClick={() => setHistPage(p => Math.min(histPages, p + 1))}>Next →</button>
               </div>
             </div>
-          );
-        })}
+          </>
+        )}
       </div>
 
+      {/* ════════════ Detail drawer (Sections 3,4,5,8,9) ════════════ */}
+      {drawerMat && (() => {
+        const m = drawerMat;
+        const rem = stockRemaining(db, m.id);
+        const tot = m.stock_tons || 0;
+        const sold = stockSold(db, m.id);
+        const h = stockHealth(rem, tot, m.min_stock || 0);
+        const ana = materialAnalytics(db, m.id, from, to);
+        const last = [...db.stock_movements].filter(mv => mv.material_id === m.id).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+        const matHistory = [...db.stock_movements].filter(mv => mv.material_id === m.id).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 6);
+        return (
+          <>
+            <div className="drawer-ov" onClick={() => setDrawerId(null)} />
+            <aside className="drawer" role="dialog" aria-label={`${m.material_name} details`}>
+              <div className="drawer-hd">
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: '-0.3px' }}>{m.material_name}</div>
+                  <div className="mono" style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
+                    HSN {m.hsn_code} · GST {m.gst_percent}% · Buy ₹{m.purchase_price || 0}/CFT · Sell ₹{m.rate || 0}/CFT
+                  </div>
+                </div>
+                <button className="mo-close" onClick={() => setDrawerId(null)} aria-label="Close">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                </button>
+              </div>
+
+              <div className="drawer-body">
+                {/* Primary inventory KPIs (Section 4) */}
+                <div className="g2" style={{ gap: 10 }}>
+                  <KpiTile ico="📦" bg="var(--accent-light)" color="var(--accent3)" label="Current Stock"
+                    value={`${(tot / 1000).toFixed(3)} MT`} sub={`${fmt2(tot)} CFT`} />
+                  <KpiTile ico="✅" bg="var(--green-light)" color="var(--green)" label="Available"
+                    value={`${fmt2(rem)}`} sub={`CFT · ${fmt2(sold)} sold`} />
+                  <KpiTile ico="💵" bg="var(--blue-light)" color="var(--blue)" label="Stock Value"
+                    value={`₹${fmt(m.stock_value || 0)}`} sub="live valuation" />
+                  <KpiTile ico="📈" bg="var(--amber-light)" color={ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)'} label="Est. Profit"
+                    value={`₹${fmt(Math.abs(ana.estProfit))}`} sub={ana.estProfit >= 0 ? 'sold − cost' : 'loss'} />
+                </div>
+
+                {/* Inventory health (Section 9) */}
+                <div className="card" style={{ padding: 14 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 700 }}>Stock Health</span>
+                    <span className={`health ${HEALTH_CLASS[h.level]}`}>{HEALTH_DOT[h.level]} {h.label} · {h.pct}%</span>
+                  </div>
+                  <div className={`hbar ${HBAR_CLASS[h.level]}`} style={{ height: 10 }}><span style={{ width: `${h.pct}%` }} /></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 11, color: 'var(--text3)' }}>
+                    <span>{fmt2(rem)} / {fmt2(tot)} CFT available</span>
+                    <span>{(m.min_stock || 0) > 0 ? `Min alert: ${fmt2(m.min_stock)} CFT` : 'No min-stock alert set'}</span>
+                  </div>
+                  {h.level === 'red' && <div className="alert alert-error" style={{ marginTop: 10, marginBottom: 0 }}>⚠ Low stock — consider restocking soon.</div>}
+                </div>
+
+                {/* Latest stock update (Section 5) */}
+                <div className="card" style={{ padding: 14, borderLeft: '3px solid var(--accent3)' }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10 }}>🔄 Latest Stock Update</div>
+                  {last ? (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                        <UpdateChip label="Previous" value={`${fmt2(last.previous_stock)} CFT`} />
+                        <span style={{ color: 'var(--text3)' }}>→</span>
+                        <UpdateChip label="Added" value={`${last.added_qty >= 0 ? '+' : ''}${fmt2(last.added_qty)} CFT`} accent="var(--green)" />
+                        <span style={{ color: 'var(--text3)' }}>→</span>
+                        <UpdateChip label="Current" value={`${fmt2(last.current_stock)} CFT`} bold />
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>
+                        {fmtDateTime12(last.date)} · by <b style={{ color: 'var(--text2)' }}>{last.updated_by}</b>{last.note ? ` · ${last.note}` : ''}
+                      </div>
+                    </>
+                  ) : <div style={{ fontSize: 12, color: 'var(--text3)' }}>No stock updates yet. Use “+ Add Stock” below.</div>}
+                </div>
+
+                {/* Period analytics (Section 8) */}
+                <div className="card" style={{ padding: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10 }}>📊 Analytics <span style={{ fontWeight: 500, color: 'var(--text3)' }}>(selected period)</span></div>
+                  <div className="g2" style={{ gap: 8 }}>
+                    <MiniStat label="Purchased" value={`${fmt2(ana.purchasedQty)} CFT`} sub={`₹${fmt(ana.purchasedValue)}`} color="var(--blue)" />
+                    <MiniStat label="Sold (Revenue)" value={`${fmt2(ana.soldQty)} CFT`} sub={`₹${fmt(ana.soldValue)}`} color="var(--green)" />
+                    <MiniStat label="Avg Buy Rate" value={ana.avgPurchaseRate > 0 ? `₹${ana.avgPurchaseRate.toFixed(2)}` : '—'} sub="per CFT" color="var(--amber)" />
+                    <MiniStat label="Profit Margin" value={ana.soldValue > 0 ? `${((ana.estProfit / ana.soldValue) * 100).toFixed(1)}%` : '—'} sub={`₹${fmt(Math.abs(ana.estProfit))}`} color={ana.estProfit >= 0 ? 'var(--green)' : 'var(--red)'} />
+                  </div>
+                </div>
+
+                {/* Per-material movement history (Section 6, scoped) */}
+                <div className="card" style={{ padding: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 10 }}>🧾 Recent Movements</div>
+                  {matHistory.length === 0 ? <div style={{ fontSize: 12, color: 'var(--text3)' }}>No movements logged.</div> : (
+                    <div className="tbl">
+                      <table>
+                        <thead><tr><th>Date</th><th>Prev</th><th>Added</th><th>Current</th><th>By</th></tr></thead>
+                        <tbody>
+                          {matHistory.map(r => (
+                            <tr key={r.movement_id}>
+                              <td style={{ fontSize: 10.5, color: 'var(--text3)' }}>{fmtDateTime12(r.date).split(' · ')[0]}</td>
+                              <td className="mono" style={{ fontSize: 11 }}>{fmt2(r.previous_stock)}</td>
+                              <td className="mono tx-cr" style={{ fontSize: 11 }}>{r.added_qty >= 0 ? '+' : ''}{fmt2(r.added_qty)}</td>
+                              <td className="mono" style={{ fontSize: 11, fontWeight: 700 }}>{fmt2(r.current_stock)}</td>
+                              <td style={{ fontSize: 10.5, color: 'var(--text3)' }}>{r.updated_by}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="drawer-foot">
+                <button className="btn btng" style={{ flex: 1 }} onClick={() => setStockForm({ matId: m.id, qty: '', rate: String(m.purchase_price || m.rate || ''), sv: '', note: '' })}>+ Add Stock</button>
+                <button className="btn" onClick={() => openEdit(m)}>Edit</button>
+                <button className="btn" onClick={() => requestDelete(m)} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>Delete</button>
+              </div>
+            </aside>
+          </>
+        );
+      })()}
+
+      {/* ════════════ Modals (logic preserved) ════════════ */}
       {editForm && (
         <Modal title={editForm.id ? 'Edit Material' : 'Add Material'} onClose={() => setEditForm(null)}>
           <div className="alert alert-info" style={{ marginBottom: 14 }}>Set rate and initial stock to activate this material for slip generation.</div>
@@ -400,5 +687,38 @@ export default function MaterialsPage() {
         />
       )}
     </>
+  );
+}
+
+// ─────────────── Small presentational helpers ───────────────
+function KpiTile({ ico, bg, color, label, value, sub }: { ico: string; bg: string; color: string; label: string; value: string; sub: string }) {
+  return (
+    <div className="kpi">
+      <div className="kpi-top">
+        <div className="kpi-ico" style={{ background: bg, color }}>{ico}</div>
+      </div>
+      <div className="kpi-lbl">{label}</div>
+      <div className="kpi-val" style={{ marginTop: 4 }}>{value}</div>
+      <div className="kpi-sub">{sub}</div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
+  return (
+    <div style={{ background: 'var(--surface2)', borderRadius: 'var(--r)', padding: 10, border: '1px solid var(--border)' }}>
+      <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text3)' }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 800, color, marginTop: 2 }}>{value}</div>
+      <div style={{ fontSize: 10, color: 'var(--text3)' }}>{sub}</div>
+    </div>
+  );
+}
+
+function UpdateChip({ label, value, accent, bold }: { label: string; value: string; accent?: string; bold?: boolean }) {
+  return (
+    <div style={{ flex: 1, textAlign: 'center', background: 'var(--surface2)', borderRadius: 'var(--r)', padding: '8px 6px', border: '1px solid var(--border)' }}>
+      <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text3)' }}>{label}</div>
+      <div style={{ fontSize: 13, fontWeight: bold ? 800 : 700, color: accent || 'var(--text)', marginTop: 2, whiteSpace: 'nowrap' }}>{value}</div>
+    </div>
   );
 }

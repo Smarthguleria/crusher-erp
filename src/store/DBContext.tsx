@@ -16,6 +16,7 @@ const DEFAULT_DB: DBShape = {
     { id: 4, material_name: '65mm', unit: 'CFT', rate: 0, purchase_price: 0, gst_percent: 5, hsn_code: '251710', stock_tons: 0, stock_value: 0, min_stock: 0 },
     { id: 5, material_name: 'River Sand', unit: 'CFT', rate: 0, purchase_price: 0, gst_percent: 5, hsn_code: '250510', stock_tons: 0, stock_value: 0, min_stock: 0 },
   ],
+  stock_movements: [],
   parties: [],
   slips: [],
   invoices: [],
@@ -35,7 +36,7 @@ const DEFAULT_DB: DBShape = {
     vehicle: 1, driver: 1, trip: 1,
     fuel: 1, maint: 1, tyre: 1,
     expense: 1, supplier: 1, purchase: 1,
-    assignment: 1,
+    assignment: 1, movement: 1,
   },
   bizInfo: {
     name: 'Your Crusher & Aggregates',
@@ -91,6 +92,7 @@ function migrate(db: DBShape): DBShape {
   // and leave the WorkspaceGate stuck on the loading spinner — making every feature
   // appear broken.
   if (!Array.isArray(db.materials)) db.materials = [];
+  if (!Array.isArray(db.stock_movements)) db.stock_movements = [];
   if (!Array.isArray(db.parties)) db.parties = [];
   if (!Array.isArray(db.slips)) db.slips = [];
   if (!Array.isArray(db.invoices)) db.invoices = [];

@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import Sidebar from '@/components/Sidebar';
+import Topbar from '@/components/Topbar';
 import WorkspaceGate from '@/components/WorkspaceGate';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 
@@ -14,8 +15,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <div className="shell">
       <Sidebar userEmail={user.email ?? ''} />
-      <div className="main">
-        <WorkspaceGate>{children}</WorkspaceGate>
+      <div className="content-col">
+        <Topbar userEmail={user.email ?? ''} />
+        <div className="main">
+          <WorkspaceGate>{children}</WorkspaceGate>
+        </div>
       </div>
     </div>
   );

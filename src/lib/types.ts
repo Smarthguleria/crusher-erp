@@ -14,6 +14,25 @@ export interface Material {
   min_stock: number;        // Low-stock alert threshold
 }
 
+// Append-only inventory audit trail. One row is written every time stock is topped up
+// (and, optionally, adjusted) so the Material Master can show previous → added → current
+// at a glance. This NEVER replaces stock_tons as the source of truth — it records the
+// before/after snapshot around each change so history is reconstructable. No calculation
+// depends on it; it is a pure audit log.
+export interface StockMovement {
+  movement_id: number;
+  material_id: number;
+  date: string;             // ISO datetime of the change
+  type: 'topup' | 'opening' | 'adjustment';
+  previous_stock: number;   // stock_tons before this change (CFT)
+  added_qty: number;        // signed quantity added (+) or removed (−) (CFT)
+  current_stock: number;    // stock_tons after this change (CFT)
+  rate?: number;            // purchase rate at the time (₹/CFT)
+  value?: number;           // stock value added (₹)
+  updated_by: string;       // actor label (e.g. "Admin")
+  note?: string;            // supplier / reference note
+}
+
 export interface Party {
   party_id: number;
   party_name: string;
@@ -242,6 +261,7 @@ export interface Purchase {
 
 export interface DBShape {
   materials: Material[];
+  stock_movements: StockMovement[];
   parties: Party[];
   slips: Slip[];
   invoices: Invoice[];
@@ -261,7 +281,7 @@ export interface DBShape {
     vehicle: number; driver: number; trip: number;
     fuel: number; maint: number; tyre: number;
     expense: number; supplier: number; purchase: number;
-    assignment: number;
+    assignment: number; movement: number;
   };
   bizInfo: BizInfo;
 }

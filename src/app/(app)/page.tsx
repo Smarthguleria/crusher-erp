@@ -40,6 +40,40 @@ export default function DashboardPage() {
 
   const recent = [...filtered].reverse().slice(0, 10);
 
+  // Top customers by total sale in the selected period (distinct from the outstanding-
+  // sorted party summary table below).
+  const topCustomers = [...partyRows].sort((a, b) => b.pTotal - a.pTotal).slice(0, 5);
+
+  // Material-wise sales (taxable revenue) within the selected period — for the bar chart.
+  const matSales = db.materials
+    .map(m => ({ name: m.material_name, value: filtered.filter(s => s.material_id === m.id).reduce((a, s) => a + s.final_amount, 0) }))
+    .filter(x => x.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  // Smart insights — week-over-week revenue trend, best material, low stock, receivables.
+  const sum7 = (offset: number) => {
+    let total = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(); d.setDate(d.getDate() - i - offset);
+      const ds = d.toISOString().split('T')[0];
+      total += db.slips.filter(s => s.date.startsWith(ds)).reduce((a, s) => a + s.final_amount, 0);
+    }
+    return total;
+  };
+  const thisWeek = sum7(0);
+  const lastWeek = sum7(7);
+  const wowPct = lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : (thisWeek > 0 ? 100 : 0);
+  const lowStockCount = db.materials.filter(m => (m.min_stock || 0) > 0 && stockRemaining(db, m.id) <= (m.min_stock || 0)).length;
+  const bestMat = matSales[0];
+
+  const insights: { tone: string; ico: string; bg: string; color: string; t: string; s: string }[] = [];
+  insights.push(wowPct >= 0
+    ? { tone: '', ico: '📈', bg: 'var(--green-light)', color: 'var(--green)', t: `Revenue ${wowPct === 0 ? 'is flat' : `up ${wowPct}%`} this week`, s: `₹${fmt(thisWeek)} vs ₹${fmt(lastWeek)} last week` }
+    : { tone: 'warn', ico: '📉', bg: 'var(--amber-light)', color: 'var(--amber)', t: `Revenue down ${Math.abs(wowPct)}% this week`, s: `₹${fmt(thisWeek)} vs ₹${fmt(lastWeek)} last week` });
+  if (bestMat) insights.push({ tone: 'info', ico: '🏆', bg: 'var(--blue-light)', color: 'var(--blue)', t: `${bestMat.name} is the top seller`, s: `₹${fmt(bestMat.value)} in this period` });
+  if (lowStockCount > 0) insights.push({ tone: 'danger', ico: '⚠', bg: 'var(--red-light)', color: 'var(--red)', t: `${lowStockCount} material${lowStockCount > 1 ? 's' : ''} low on stock`, s: 'Check Material Master to restock' });
+  insights.push({ tone: 'warn', ico: '💰', bg: 'var(--amber-light)', color: 'var(--amber)', t: `₹${fmt(pendingAmt + debtAmt)} outstanding`, s: 'Pending + debt receivable' });
+
   // ─── Period-scoped accounting aggregates. Stock-related cards (e.g. Available
   // in the Live Stock Status panel) intentionally bypass the date filter — current
   // stock must always reflect live inventory, not historical-window slices. ───
@@ -84,6 +118,16 @@ export default function DashboardPage() {
             purchases, expenses) honour this filter — Live Stock Status below uses
             stockRemaining() which always reflects real-time inventory. */}
         <DateFilter defaultPreset="week" onChange={(f, t) => { setFrom(f); setTo(t); }} />
+      </div>
+
+      {/* Smart business insights */}
+      <div className="g4" style={{ marginBottom: 14 }}>
+        {insights.map((n, i) => (
+          <div key={i} className={`insight ${n.tone}`}>
+            <div className="insight-ico" style={{ background: n.bg, color: n.color }}>{n.ico}</div>
+            <div><div className="insight-t">{n.t}</div><div className="insight-s">{n.s}</div></div>
+          </div>
+        ))}
       </div>
 
       {/* Top row — Revenue · Outstanding · Qty Sold (3-col per dashboard spec). */}
@@ -174,6 +218,50 @@ export default function DashboardPage() {
               </div>
             );
           })}
+        </div>
+      </div>
+
+      {/* Material-wise sales + Top customers */}
+      <div className="g2" style={{ marginBottom: 14 }}>
+        <div className="card">
+          <div className="section-hdr">Material-wise Sales</div>
+          {matSales.length === 0 ? (
+            <div className="empty"><div className="empty-icon">📊</div>No sales in this period</div>
+          ) : (
+            <div style={{ position: 'relative', height: Math.max(140, matSales.length * 34) }}>
+              <Bar
+                data={{ labels: matSales.map(x => x.name), datasets: [{ label: 'Sales', data: matSales.map(x => x.value), backgroundColor: '#1B4F8A', borderRadius: 5 }] }}
+                options={{
+                  indexAxis: 'y' as const,
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  plugins: { legend: { display: false } },
+                  scales: {
+                    x: { ticks: { callback: v => '₹' + fmt(v as number), font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.04)' } },
+                    y: { ticks: { font: { size: 11 } }, grid: { display: false } },
+                  },
+                }}
+              />
+            </div>
+          )}
+        </div>
+        <div className="card">
+          <div className="section-hdr">Top Customers</div>
+          {topCustomers.length === 0 ? (
+            <div className="empty"><div className="empty-icon">🤝</div>No customers in this period</div>
+          ) : topCustomers.map((c, i) => (
+            <div key={c.p.party_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: i < topCustomers.length - 1 ? '1px solid var(--border)' : 'none' }}>
+              <div className="tb-avatar" style={{ width: 30, height: 30, fontSize: 11 }}>{(c.p.party_name || '?').slice(0, 2).toUpperCase()}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.p.party_name}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--text3)' }}>{fmt2(c.pQty)} CFT · {c.p.state}</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--accent)' }}>₹{fmt(c.pTotal)}</div>
+                {c.outstanding > 0 && <div style={{ fontSize: 10, color: 'var(--red)', fontWeight: 600 }}>₹{fmt(c.outstanding)} due</div>}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 

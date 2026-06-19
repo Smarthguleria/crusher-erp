@@ -93,27 +93,34 @@ export const stockRemaining = (db: DBShape, mid: number) => {
 //   avg_purchase_rate               — weighted average from purchase entries.
 //   current_stock_value             — remaining qty × avg purchase rate.
 //   est_profit                      — sold_value − (sold_qty × avg_purchase_rate).
-export function materialAnalytics(db: DBShape, mid: number) {
-  const purchases = db.purchases.filter(p => p.material_id === mid);
+export function materialAnalytics(db: DBShape, mid: number, from: string | null = null, to: string | null = null) {
+  // Cost basis (avg purchase rate) is ALWAYS computed from the full purchase history so
+  // COGS/profit have a stable, live cost — never zeroed out just because the selected
+  // window happens to contain no purchases. The period-scoped figures (purchased / sold /
+  // revenue / profit) honour the date range; current stock & valuation stay live (Section 7).
+  const allPurchases = db.purchases.filter(p => p.material_id === mid);
+  const allPurchasedQty = allPurchases.reduce((a, p) => a + p.quantity, 0);
+  const allPurchasedValue = allPurchases.reduce((a, p) => a + p.total_amount, 0);
+  const avgPurchaseRate = allPurchasedQty > 0 ? allPurchasedValue / allPurchasedQty : 0;
+
+  // Period-scoped purchases.
+  const purchases = dateRangeFilter(allPurchases, from, to);
   const purchasedQty = purchases.reduce((a, p) => a + p.quantity, 0);
   const purchasedValue = purchases.reduce((a, p) => a + p.total_amount, 0);
-  const avgPurchaseRate = purchasedQty > 0 ? purchasedValue / purchasedQty : 0;
 
   // Sold qty comes from invoices (post-billing); falls back to slip totals for any
   // sale that hasn't been formally invoiced yet. We dedupe by slip_id because every
   // invoice is linked to a slip and we want each sale counted once.
   const invoicedSlipIds = new Set(db.invoices.map(i => i.slip_id));
-  const soldFromInvoices = db.invoices
-    .filter(i => i.material_id === mid)
+  const soldFromInvoices = dateRangeFilter(db.invoices.filter(i => i.material_id === mid), from, to)
     .reduce((acc, i) => ({ qty: acc.qty + i.quantity, value: acc.value + i.base_amount }), { qty: 0, value: 0 });
-  const soldFromUninvoicedSlips = db.slips
-    .filter(s => s.material_id === mid && !invoicedSlipIds.has(s.slip_id))
+  const soldFromUninvoicedSlips = dateRangeFilter(db.slips.filter(s => s.material_id === mid && !invoicedSlipIds.has(s.slip_id)), from, to)
     .reduce((acc, s) => ({ qty: acc.qty + s.quantity, value: acc.value + s.base_amount }), { qty: 0, value: 0 });
   const soldQty = soldFromInvoices.qty + soldFromUninvoicedSlips.qty;
   const soldValue = soldFromInvoices.value + soldFromUninvoicedSlips.value;
 
-  const remaining = stockRemaining(db, mid);
-  const currentStockValue = remaining * avgPurchaseRate;
+  const remaining = stockRemaining(db, mid);                 // live — ignores date filter
+  const currentStockValue = remaining * avgPurchaseRate;     // live valuation
   const costOfGoodsSold = soldQty * avgPurchaseRate;
   const estProfit = soldValue - costOfGoodsSold;
 
@@ -123,6 +130,18 @@ export function materialAnalytics(db: DBShape, mid: number) {
     remaining, currentStockValue,
     costOfGoodsSold, estProfit,
   };
+}
+
+// Stock-health classifier used by the Material Master cards and bars (Section 9).
+//   green  > 50% available · amber 20–50% · red < 20% (or below the min-stock alert).
+export type HealthLevel = 'green' | 'amber' | 'red';
+export function stockHealth(remaining: number, total: number, minStock = 0): { pct: number; level: HealthLevel; label: string } {
+  const pct = total > 0 ? Math.min(100, Math.max(0, Math.round((remaining / total) * 100))) : 0;
+  const belowMin = minStock > 0 && remaining <= minStock;
+  let level: HealthLevel = pct >= 50 ? 'green' : pct >= 20 ? 'amber' : 'red';
+  if (belowMin) level = 'red';
+  const label = level === 'green' ? 'Healthy' : level === 'amber' ? 'Low Stock' : 'Critical';
+  return { pct, level, label };
 }
 
 export const payLabel = (p: PaymentStatus) =>
