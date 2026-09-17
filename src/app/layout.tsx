@@ -3,6 +3,7 @@ import './globals.css';
 import { DBProvider } from '@/store/DBContext';
 import { ToastProvider } from '@/store/ToastContext';
 import { ThemeProvider, themeBootScript } from '@/store/ThemeContext';
+import { Analytics } from '@vercel/analytics/next';
 
 export const metadata: Metadata = {
   title: 'Crusher ERP — Punjab GST System',
@@ -27,6 +28,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <DBProvider>{children}</DBProvider>
           </ToastProvider>
         </ThemeProvider>
+        <Analytics />
       </body>
     </html>
   );
